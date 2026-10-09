@@ -774,6 +774,18 @@ export interface CompositeChildInfo {
   weight: number
 }
 
+export type EntryFill = 'close_t' | 'open_t+1' | 'high_t'
+export type ExitFill = 'close_t' | 'open_t+1' | 'signal_next_minute'
+
+/**
+ * 策略自带的回测成交口径默认值, 由策略源文件 META.backtest_defaults 声明。
+ * 打板类策略必须按信号日当天成交(日线口径 = 当日收盘 或 当日最高价), 否则信号会被推迟到次日开盘而失真。
+ */
+export interface StrategyBacktestDefaults {
+  entry_fill?: EntryFill
+  exit_fill?: ExitFill
+}
+
 export interface StrategyDetail {
   id: string
   name: string
@@ -786,6 +798,9 @@ export interface StrategyDetail {
   timeframes: string[]
   version: string
   basic_filter: Record<string, any>
+  // 策略自带的回测成交口径默认值(如打板策略必须按信号日收盘成交)。
+  // 前端选中策略时套用, 用户仍可在回测页手动覆盖; 未声明时为 null。
+  backtest_defaults: StrategyBacktestDefaults | null
   params: StrategyParamDef[]
   params_defaults: Record<string, any>
   scoring: Record<string, number>
@@ -3132,7 +3147,7 @@ export const api = {
     params?: Record<string, any> | null
     overrides?: Record<string, any> | null
     matching?: 'close_t' | 'open_t+1'
-    entry_fill?: 'close_t' | 'open_t+1' | null
+    entry_fill?: 'close_t' | 'open_t+1' | 'high_t' | null
     exit_fill?: 'close_t' | 'open_t+1' | 'signal_next_minute' | null
     fees_pct?: number
     commission_pct?: number
