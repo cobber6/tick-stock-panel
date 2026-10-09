@@ -44,12 +44,31 @@ def _matrix_entry_score(matrix: MarketMatrix, time_id: int, asset_id: int) -> fl
 # 数据结构
 # ================================================================
 
+def _fill_base_prices(
+    fill: str | None,
+    open_prices: np.ndarray,
+    close_prices: np.ndarray,
+    high_prices: np.ndarray,
+) -> np.ndarray:
+    """成交口径 → 基准价数组。
+
+    close_t = 信号当日收盘; open_t+1 = 次日开盘; high_t = 当日最高价。
+    high_t 是打板口径: 触板日的最高价就是涨停价, 封板日 high == close == 涨停价,
+    因此「触板即买」与「封板才买」两种触发下它都等于打板单的真实成交价。
+    """
+    if fill == "open_t+1":
+        return open_prices
+    if fill == "high_t":
+        return high_prices
+    return close_prices
+
+
 @dataclass
 class MatcherConfig:
     # matching 为向后兼容入口: 仅传 matching 时, entry_fill/exit_fill 都取 matching 的值。
     # 显式传入 entry_fill/exit_fill 时以二者为准 (允许建仓/清仓口径不同)。
     matching: Literal["close_t", "open_t+1"] = "close_t"
-    entry_fill: Literal["close_t", "open_t+1"] | None = None
+    entry_fill: Literal["close_t", "open_t+1", "high_t"] | None = None
     exit_fill: Literal["close_t", "open_t+1", "signal_next_minute"] | None = None
     # 成本模型: 优先使用拆分口径 (佣金双边 + 印花税仅卖出 + 滑点双边)。
     # 未设 commission_pct 时回退到 fees_pct 作为双边佣金 (向后兼容, 无印花税)。
@@ -699,16 +718,18 @@ class BacktestEngine:
         if not ent.any():
             return self._empty_result()
 
-        # 成交口径: entry/exit 可分别配置 close_t (信号当日收盘) 或 open_t+1 (次日开盘)。
-        # open_t+1 时信号右移 1 天 (用前一根的信号 + 当根的 open 成交)。
+        # 成交口径: entry/exit 可分别配置 close_t (信号当日收盘) / open_t+1 (次日开盘)
+        # 或 high_t (当日最高价, 打板触板价)。open_t+1 时信号右移 1 天
+        # (用前一根的信号 + 当根的 open 成交)。
         open_prices = panel["open"].to_numpy()
         close_prices = panel["close"].to_numpy()
+        high_prices = panel["high"].to_numpy() if "high" in panel.columns else close_prices
 
         # 同一 symbol 内相邻行掩码, 跨 symbol 边界不允许 shift (避免错配)。
         same_prev_symbol = np.zeros(n, dtype=bool)
         same_prev_symbol[1:] = panel_symbols[1:] == panel_symbols[:-1]
 
-        entry_prices = open_prices if config.entry_fill == "open_t+1" else close_prices
+        entry_prices = _fill_base_prices(config.entry_fill, open_prices, close_prices, high_prices)
         exit_prices = open_prices if config.exit_fill == "open_t+1" else close_prices
 
         if config.entry_fill == "open_t+1":
@@ -841,8 +862,8 @@ class BacktestEngine:
 
     @staticmethod
     def _resolve_entry_prices(matrix: "MarketMatrix", config: "MatcherConfig") -> np.ndarray:
-        """入场价矩阵: 分钟策略的逐格覆盖有限值处优先, 否则按 open/close 惯例。"""
-        base = matrix.open if config.entry_fill == "open_t+1" else matrix.close
+        """入场价矩阵: 分钟策略的逐格覆盖有限值处优先, 否则按成交口径惯例。"""
+        base = _fill_base_prices(config.entry_fill, matrix.open, matrix.close, matrix.high)
         if matrix.entry_price is None:
             return base
         return np.where(np.isfinite(matrix.entry_price), matrix.entry_price, base)
@@ -1235,7 +1256,7 @@ class BacktestEngine:
         low_prices = panel["low"].to_numpy()
         close_prices = panel["close"].to_numpy()
         # 撮合价: 建仓/清仓各自独立选列。
-        entry_prices = open_prices if config.entry_fill == "open_t+1" else close_prices
+        entry_prices = _fill_base_prices(config.entry_fill, open_prices, close_prices, high_prices)
         exit_prices = open_prices if config.exit_fill == "open_t+1" else close_prices
 
         # ── 分钟K精确成交预加载 (同 simulate_portfolio) ──
@@ -2266,7 +2287,7 @@ class BacktestEngine:
         low_prices = panel["low"].to_numpy()
         close_prices = panel["close"].to_numpy()
         # 撮合价: 建仓/清仓各自独立选列。
-        entry_prices = open_prices if config.entry_fill == "open_t+1" else close_prices
+        entry_prices = _fill_base_prices(config.entry_fill, open_prices, close_prices, high_prices)
         exit_prices = open_prices if config.exit_fill == "open_t+1" else close_prices
         has_volume = "volume" in panel.columns
         volumes = panel["volume"].fill_null(0).to_numpy() if has_volume else np.ones(n, dtype=float)

@@ -345,6 +345,7 @@ META = {{...}}，{entrypoint_requirement}。只输出完整 Python 代码。
         "polars",
         "numpy",
         "app.backtest.matrix",
+        "app.price_limits",       # 涨跌停价与风险警示股规则 (纯函数, 无 I/O): 策略按交易所口径判定「触板」
         "app.strategy.builtin.factor_rank_research",
         "app.strategy.market_data",   # 新增: 策略可读取指数/ETF 日K
         "datetime",

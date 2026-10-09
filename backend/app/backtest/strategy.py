@@ -556,7 +556,7 @@ class StrategyBacktestConfig:
     overrides: dict | None = None
     # matching 为向后兼容入口; 显式传 entry_fill/exit_fill 时以二者为准。
     matching: Literal["close_t", "open_t+1"] = "open_t+1"
-    entry_fill: Literal["close_t", "open_t+1"] | None = None
+    entry_fill: Literal["close_t", "open_t+1", "high_t"] | None = None
     exit_fill: Literal["close_t", "open_t+1", "signal_next_minute"] | None = None
     fees_pct: float = 0.0002
     commission_pct: float | None = None
