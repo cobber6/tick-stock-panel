@@ -259,6 +259,19 @@ function Cleanup-All {
 
 # ===== 7. Main loop - pump output, handle Ctrl-C =====
 # Treat Ctrl-C as input so try/finally is guaranteed to run.
+# 日志前缀改用 [Console]::Write 直写, 不用 Write-Host -NoNewline -ForegroundColor:
+# 后者会在托管堆留下每行残留 (实测 GC 回收不掉, 与日志行数线性增长, 长跑可到 GB 级),
+# 且慢一到两个数量级 (对照实测 5 万行 41.6s vs 直写 0.5s); 直写不留任何每行对象。
+# 颜色用 ANSI (与 dev.sh 的 printf 前缀同口径); 输出被重定向时不发转义, 保持日志文件干净。
+$esc = [char]27
+if ([Console]::IsOutputRedirected) {
+    $backendTag  = '[backend ] '
+    $frontendTag = '[frontend] '
+} else {
+    $backendTag  = "$esc[34m[backend ] $esc[0m"
+    $frontendTag = "$esc[32m[frontend] $esc[0m"
+}
+
 $prevCtrlC = [Console]::TreatControlCAsInput
 try {
     [Console]::TreatControlCAsInput = $true
@@ -274,16 +287,16 @@ try {
         $bOut = Receive-Job $backendJob -ErrorAction SilentlyContinue
         if ($bOut) {
             foreach ($line in $bOut) {
-                Write-Host '[backend ] ' -NoNewline -ForegroundColor Blue
-                Write-Host $line
+                [Console]::Write($backendTag)
+                [Console]::WriteLine($line)
             }
         }
 
         $fOut = Receive-Job $frontendJob -ErrorAction SilentlyContinue
         if ($fOut) {
             foreach ($line in $fOut) {
-                Write-Host '[frontend] ' -NoNewline -ForegroundColor Green
-                Write-Host $line
+                [Console]::Write($frontendTag)
+                [Console]::WriteLine($line)
             }
         }
 
