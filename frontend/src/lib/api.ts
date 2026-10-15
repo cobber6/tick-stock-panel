@@ -810,6 +810,15 @@ export interface CompositeChildInfo {
   weight: number
 }
 
+export type EntryFill = 'close_t' | 'open_t+1' | 'high_t'
+export type ExitFill = 'close_t' | 'open_t+1' | 'signal_next_minute'
+
+/** 策略 META 声明的推荐成交口径 (回测页选中该策略时作为默认值) */
+export interface StrategyBacktestDefaults {
+  entry_fill?: EntryFill
+  exit_fill?: ExitFill
+}
+
 export interface StrategyDetail {
   id: string
   name: string
@@ -822,6 +831,7 @@ export interface StrategyDetail {
   timeframes: string[]
   version: string
   basic_filter: Record<string, any>
+  backtest_defaults: StrategyBacktestDefaults | null
   params: StrategyParamDef[]
   params_defaults: Record<string, any>
   scoring: Record<string, number>
@@ -3270,7 +3280,7 @@ export const api = {
     params?: Record<string, any> | null
     overrides?: Record<string, any> | null
     matching?: 'close_t' | 'open_t+1'
-    entry_fill?: 'close_t' | 'open_t+1' | null
+    entry_fill?: 'close_t' | 'open_t+1' | 'high_t' | null
     exit_fill?: 'close_t' | 'open_t+1' | 'signal_next_minute' | null
     fees_pct?: number
     commission_pct?: number

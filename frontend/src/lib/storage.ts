@@ -144,7 +144,7 @@ export const storage = {
     start: string
     end: string
     matching: 'close_t' | 'open_t+1'
-    entryFill: 'close_t' | 'open_t+1'
+    entryFill: 'close_t' | 'open_t+1' | 'high_t'
     exitFill: 'close_t' | 'open_t+1' | 'signal_next_minute'
     fees: string
     stampTax?: string

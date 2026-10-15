@@ -345,6 +345,9 @@ const buildDefaultOverrides = (detail: StrategyDetail) => normalizeStrategyOverr
 const strategyBacktestConfigSignature = (detail: StrategyDetail) => JSON.stringify({
   execution_backend: detail.execution_backend,
   basic_filter: detail.basic_filter,
+  // 成交口径声明属于策略配置面: 声明变化时让已保存的表单状态失效,
+  // 否则老用户会把旧口径(如次日开盘)一直沿用下去, 策略自带的默认值形同虚设。
+  backtest_defaults: detail.backtest_defaults,
   params: detail.params,
   params_defaults: detail.params_defaults,
   scoring: detail.scoring,
@@ -966,7 +969,7 @@ export function StrategyBacktest({ loadCandidate, onLoadConsumed }: {
   const [end, setEnd] = useState(saved?.end ?? TODAY)
   // 成交口径: 建仓/清仓可独立配置。向后兼容老 matching (派生为 entry=exit=matching)。
   const [matching] = useState<'close_t' | 'open_t+1'>(saved?.matching ?? 'open_t+1')
-  const [entryFill, setEntryFill] = useState<'close_t' | 'open_t+1'>(saved?.entryFill ?? saved?.matching ?? 'open_t+1')
+  const [entryFill, setEntryFill] = useState<'close_t' | 'open_t+1' | 'high_t'>(saved?.entryFill ?? saved?.matching ?? 'open_t+1')
   const [exitFill, setExitFill] = useState<'close_t' | 'open_t+1' | 'signal_next_minute'>(
     saved ? (saved.exitFill ?? saved.matching ?? 'close_t') : 'open_t+1',
   )
@@ -1015,7 +1018,9 @@ export function StrategyBacktest({ loadCandidate, onLoadConsumed }: {
     }
     if (cfg.start) setStart(String(cfg.start).slice(0, 10))
     if (cfg.end) setEnd(String(cfg.end).slice(0, 10))
-    if (cfg.entry_fill === 'close_t' || cfg.entry_fill === 'open_t+1') setEntryFill(cfg.entry_fill)
+    if (cfg.entry_fill === 'close_t' || cfg.entry_fill === 'open_t+1' || cfg.entry_fill === 'high_t') {
+      setEntryFill(cfg.entry_fill)
+    }
     if (cfg.exit_fill === 'close_t' || cfg.exit_fill === 'open_t+1' || cfg.exit_fill === 'signal_next_minute') {
       setExitFill(cfg.exit_fill)
     }
@@ -1122,6 +1127,11 @@ export function StrategyBacktest({ loadCandidate, onLoadConsumed }: {
   const resetConfigFromDetail = (detail: StrategyDetail) => {
     setStrategyParams(strategyDefaultParams(detail))
     setOverrides(buildDefaultOverrides(detail))
+    // 策略声明了自己的成交口径时(如打板策略必须按信号日当天成交), 一并恢复默认。
+    // 只覆盖声明过的字段, 未声明的策略保持页面当前口径不变。
+    const fills = detail.backtest_defaults
+    if (fills?.entry_fill) setEntryFill(fills.entry_fill)
+    if (fills?.exit_fill) setExitFill(fills.exit_fill)
   }
 
   // 「应用到策略」: 把弹窗里当前编辑的 overrides + params 持久化为策略定义,
@@ -1497,6 +1507,9 @@ export function StrategyBacktest({ loadCandidate, onLoadConsumed }: {
   const detail = strategyDetail.data
   const matrixStrategy = detail?.execution_backend === 'matrix_native'
   const compositeStrategy = detail?.source === 'composite'
+  // 策略自带信号日收盘口径 => 该策略的信号本就在盘中可确认, 不再弹通用告警
+  const declaresCloseFill = detail?.backtest_defaults?.entry_fill === 'close_t'
+    || detail?.backtest_defaults?.exit_fill === 'close_t'
   const visibleAdvancedTabs = useMemo(
     () => compositeStrategy
       // composite 的触发器/评分由子策略决定, 只调合并参数与风控
@@ -1898,9 +1911,10 @@ export function StrategyBacktest({ loadCandidate, onLoadConsumed }: {
                 <span className="text-[8px] px-1 py-px rounded border border-sky-500/30 bg-sky-500/10 text-sky-400">分钟</span>
               </div>
             ) : (
-              <select value={entryFill} onChange={e => setEntryFill(e.target.value as 'close_t' | 'open_t+1')} className={INPUT_CLS}>
+              <select value={entryFill} onChange={e => setEntryFill(e.target.value as 'close_t' | 'open_t+1' | 'high_t')} className={INPUT_CLS}>
                 <option value="open_t+1">次日开盘（推荐）</option>
                 <option value="close_t">信号日收盘</option>
+                <option value="high_t">当日最高价（打板触板价）</option>
               </select>
             )}
           </div>
@@ -1918,7 +1932,7 @@ export function StrategyBacktest({ loadCandidate, onLoadConsumed }: {
               )}
             </select>
           </div>
-          {!isMinuteStrategy && (entryFill === 'close_t' || exitFill === 'close_t') && (
+          {!isMinuteStrategy && !declaresCloseFill && (entryFill === 'close_t' || exitFill === 'close_t') && (
             <div className="col-span-2 flex items-start gap-1 text-[10px] leading-4 text-warning">
               <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" />
               <span>信号日收盘仅适合收盘前已确认的信号</span>

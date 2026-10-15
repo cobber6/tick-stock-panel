@@ -161,6 +161,32 @@ def _child_meta(engine: StrategyEngine | None, child_id: str) -> dict:
     return {"name": str(child.meta.get("name") or child_id), "source": child.source}
 
 
+_BACKTEST_ENTRY_FILLS = frozenset({"close_t", "open_t+1", "high_t"})
+_BACKTEST_EXIT_FILLS = frozenset({"close_t", "open_t+1", "signal_next_minute"})
+
+
+def _backtest_defaults(meta: dict) -> dict | None:
+    """策略自带的回测成交口径默认值, 由策略 META.backtest_defaults 声明.
+
+    部分策略的信号只有在信号日当天成交才成立 (如打板策略必须按封板日收盘价成交,
+    推到次日开盘就退化成「无脑追高开」). 此类策略可在 META 里声明默认口径,
+    前端选中该策略时自动套用, 用户仍可在回测页手动覆盖.
+
+    非法值一律丢弃而非透传: META 是策略源文件里的自由 dict, 坏配置不该流到前端.
+    """
+    raw = meta.get("backtest_defaults")
+    if not isinstance(raw, dict):
+        return None
+    entry_fill = raw.get("entry_fill")
+    exit_fill = raw.get("exit_fill")
+    result: dict = {}
+    if entry_fill in _BACKTEST_ENTRY_FILLS:
+        result["entry_fill"] = entry_fill
+    if exit_fill in _BACKTEST_EXIT_FILLS:
+        result["exit_fill"] = exit_fill
+    return result or None
+
+
 def _strategy_detail(
     s: StrategyDef,
     overrides: dict | None = None,
@@ -195,6 +221,7 @@ def _strategy_detail(
         "timeframes": s.meta.get("timeframes", ["1d"]),
         "version": s.meta.get("version", "1.0.0"),
         "basic_filter": bf,
+        "backtest_defaults": _backtest_defaults(s.meta),
         "params": s.meta.get("params", []),
         "params_defaults": params_defaults,
         "scoring": scoring,

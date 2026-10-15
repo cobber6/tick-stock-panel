@@ -21,7 +21,7 @@ function mkStrategy(p: Partial<StrategyDetail> & Pick<StrategyDetail, 'id' | 'na
   return {
     description: '', tags: [], research_only: false,
     execution_backend: 'polars_expr', asset_types: ['stock'], timeframes: ['1d'],
-    version: '1', basic_filter: {}, params: [], params_defaults: {},
+    version: '1', basic_filter: {}, backtest_defaults: null, params: [], params_defaults: {},
     scoring: {}, scoring_directions: {}, entry_signals: [], exit_signals: [],
     minute_exit_trigger_supported_signals: [], stop_loss: null, take_profit: null,
     trailing_stop: null, trailing_take_profit_activate: null,
