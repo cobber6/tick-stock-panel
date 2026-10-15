@@ -20,6 +20,12 @@ logger = logging.getLogger(__name__)
 
 _EXCHANGES = ["SH", "SZ", "BJ"]
 
+# 覆盖写前的健全性护栏(2026-10-14 深市 2905 只被残缺覆盖丢失后补):
+# 新数据不得缺少既有维表里出现过的交易所; 既有维表规模可观时, 新行数也不得跌破该比例。
+# 阈值刻意宽松 —— 只挡「整体丢所/大规模丢行」这类灾难, 不挡正常的新增退市。
+_MIN_ROWS_RATIO = 0.5
+_SHRINK_GUARD_MIN_ROWS = 1000
+
 
 def _flatten_instruments(items: list[dict]) -> list[dict]:
     """把 SDK 返回的 Instrument 列表 flatten 成扁平行。"""
@@ -72,24 +78,61 @@ def _fetch_instruments_via_provider() -> list[dict] | None:
     return rows
 
 
+def _fetch_via_tickflow() -> list[dict] | None:
+    """逐交易所直连拉取标的维表。
+
+    任一交易所失败或返回空即返回 None(放弃本次同步) —— 覆盖写是全量的, 少一所等于把
+    那个市场的标的从维表里删掉, 宁可不更新。
+    """
+    tf = get_client()
+    all_rows: list[dict] = []
+    for ex in _EXCHANGES:
+        try:
+            items = tf.exchanges.get_instruments(ex, instrument_type="stock")
+        except Exception as e:  # noqa: BLE001
+            logger.error("get_instruments(%s) failed, 放弃本次维表同步(保留现有维表): %s", ex, e)
+            return None
+        if not items:
+            logger.error("get_instruments(%s) 返回空, 放弃本次维表同步(保留现有维表)", ex)
+            return None
+        all_rows.extend(_flatten_instruments(items))
+        logger.info("instruments %s: %d stocks", ex, len(items))
+    return all_rows
+
+
+def _overwrite_hazard(out: Path, new_df: pl.DataFrame) -> str | None:
+    """覆盖写前的健全性校验: 返回拒绝覆盖的原因, None 表示可以写。"""
+    if not out.exists():
+        return None
+    try:
+        old = pl.read_parquet(out)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("读取既有维表失败, 跳过覆盖前校验: %s", e)
+        return None
+
+    if "exchange" in old.columns and "exchange" in new_df.columns:
+        lost = sorted(
+            set(old["exchange"].drop_nulls().unique().to_list())
+            - set(new_df["exchange"].drop_nulls().unique().to_list()),
+        )
+        if lost:
+            return f"新数据缺少既有交易所 {lost}"
+    if old.height >= _SHRINK_GUARD_MIN_ROWS and new_df.height < old.height * _MIN_ROWS_RATIO:
+        return f"行数由 {old.height} 跌至 {new_df.height} (不足 {_MIN_ROWS_RATIO:.0%})"
+    return None
+
+
 def sync_instruments(data_dir: Path) -> int:
     """全量同步标的维表 → data/instruments/instruments.parquet。
 
-    返回写入的行数。
+    返回写入的行数; 0 表示未写入 —— 拉取失败或未通过覆盖前校验时保留现有维表原样。
     """
     all_rows = _fetch_instruments_via_provider()
     if all_rows is None:
         # 未命中非 tickflow provider → 走 tickflow 直连
-        tf = get_client()
-        all_rows = []
-        for ex in _EXCHANGES:
-            try:
-                items = tf.exchanges.get_instruments(ex, instrument_type="stock")
-                if items:
-                    all_rows.extend(_flatten_instruments(items))
-                    logger.info("instruments %s: %d stocks", ex, len(items))
-            except Exception as e:
-                logger.warning("get_instruments(%s) failed: %s", ex, e)
+        all_rows = _fetch_via_tickflow()
+        if all_rows is None:
+            return 0
 
     if not all_rows:
         return 0
@@ -98,6 +141,11 @@ def sync_instruments(data_dir: Path) -> int:
     df = df.with_columns(pl.lit(date.today()).alias("as_of"))
 
     out = data_dir / "instruments" / "instruments.parquet"
+    hazard = _overwrite_hazard(out, df)
+    if hazard:
+        logger.error("维表疑似残缺(%s), 放弃覆盖 %s, 保留现有维表", hazard, out)
+        return 0
+
     out.parent.mkdir(parents=True, exist_ok=True)
     atomic_write_parquet(df, out)
 
