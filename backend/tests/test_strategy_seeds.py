@@ -1,10 +1,10 @@
 """策略种子 seed_missing_builtins — 去内置化补全回归(仅升级用户)。
 
 新版本没有内置策略: 新装环境策略库为空、不种入; 只有检测到旧版使用
-痕迹 (已有策略/日K数据/自选) 的升级数据目录才把 25 个原内置策略按
+痕迹 (已有策略/日K数据/自选) 的升级数据目录才把 26 个原内置策略按
 文件名补回 custom。此处回归:
   - 新装目录 (无痕迹) 跳过种入并落标记, 之后用久了也不回头种;
-  - 升级目录 (有痕迹) 一次写入全部 25 个, 标记防重;
+  - 升级目录 (有痕迹) 一次写入全部 26 个, 标记防重;
   - 已有同名文件一律不覆盖 (用户自行迁移过的零写入);
   - 删除后重启不复活;
   - 种入的文件能被引擎真实加载。
@@ -56,9 +56,9 @@ def test_seed_writes_all_and_marks(tmp_path):
     _make_upgrade_dir(tmp_path)
     n = seed_missing_builtins(tmp_path)
 
-    assert n == _EXPECTED_COUNT == 25
+    assert n == _EXPECTED_COUNT == 26
     custom = tmp_path / "strategies" / "custom"
-    assert len(list(custom.glob("*.py"))) == 25
+    assert len(list(custom.glob("*.py"))) == 26
     assert (custom / ".seeded_v1").exists()
     # 幂等: 标记存在, 再次启动零写入
     assert seed_missing_builtins(tmp_path) == 0
@@ -99,4 +99,4 @@ def test_seeded_strategies_load_in_engine(tmp_path):
     engine = StrategyEngine(strategy_dirs=[tmp_path / "strategies" / "custom"])
 
     assert not engine.load_errors(), engine.load_errors()
-    assert len(engine.list_strategies()) == 25
+    assert len(engine.list_strategies()) == 26
