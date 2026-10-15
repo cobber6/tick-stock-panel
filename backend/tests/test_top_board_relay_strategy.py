@@ -9,7 +9,7 @@ from app.backtest.matrix import (
     MatrixStrategyPipeline,
     build_market_data_matrix,
 )
-from app.strategy.builtin import top_board_relay
+from app.strategy.seeds import top_board_relay
 
 DAY1 = date(2024, 1, 2)
 DAY2 = date(2024, 1, 3)

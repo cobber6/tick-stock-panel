@@ -89,7 +89,7 @@ def _fetch_via_tickflow() -> list[dict] | None:
     for ex in _EXCHANGES:
         try:
             items = tf.exchanges.get_instruments(ex, instrument_type="stock")
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             logger.error("get_instruments(%s) failed, 放弃本次维表同步(保留现有维表): %s", ex, e)
             return None
         if not items:
@@ -106,7 +106,7 @@ def _overwrite_hazard(out: Path, new_df: pl.DataFrame) -> str | None:
         return None
     try:
         old = pl.read_parquet(out)
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         logger.warning("读取既有维表失败, 跳过覆盖前校验: %s", e)
         return None
 

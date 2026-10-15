@@ -425,8 +425,8 @@ import hashlib
 class _BacktestJob:
     """单个回测任务的状态, 存模块级供重连使用。"""
     __slots__ = (
-        "key", "cancel_event", "progress", "result", "error", "done", "finish_ts",
-        "created_ts", "started",
+        "cancel_event", "created_ts", "done", "error", "finish_ts",
+        "key", "progress", "result", "started",
     )
 
     def __init__(self, key: str):
