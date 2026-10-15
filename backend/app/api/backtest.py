@@ -424,7 +424,10 @@ import hashlib
 
 class _BacktestJob:
     """单个回测任务的状态, 存模块级供重连使用。"""
-    __slots__ = ("key", "cancel_event", "progress", "result", "error", "done", "finish_ts")
+    __slots__ = (
+        "cancel_event", "created_ts", "done", "error", "finish_ts",
+        "key", "progress", "result", "started",
+    )
 
     def __init__(self, key: str):
         self.key = key
@@ -434,6 +437,8 @@ class _BacktestJob:
         self.error: str | None = None
         self.done = False
         self.finish_ts: float = 0.0
+        self.created_ts: float = time.time()  # 入表时刻 (用于兜底回收从未启动的条目)
+        self.started = False                  # worker 线程是否已启动
 
 
 # 模块级任务表: key -> _BacktestJob
@@ -443,10 +448,20 @@ _JOB_TTL = 300  # 完成后保留 5 分钟
 
 
 def _cleanup_stale_jobs():
-    """清理过期任务 (完成超过 TTL 的)。全程持 _jobs_lock: 迭代+pop 与其他访问互斥。"""
+    """清理过期任务。全程持 _jobs_lock: 迭代+pop 与其他访问互斥。
+
+    两类: (1) 已完成且超过 TTL 的; (2) 入表后从未启动 worker 线程且超过 TTL 的。
+    后者对应"入表了但没人收尾"的路径 (客户端在事件流开始前断开等), 既不置 done
+    也没有线程会终结它, 只能在此兜底回收。已启动的运行中作业不在此列。
+    """
     now = time.time()
     with _jobs_lock:
-        stale = [k for k, j in _running_jobs.items() if j.done and now - j.finish_ts > _JOB_TTL]
+        stale = [
+            k
+            for k, j in _running_jobs.items()
+            if (j.done and now - j.finish_ts > _JOB_TTL)
+            or (not j.started and now - j.created_ts > _JOB_TTL)
+        ]
         for k in stale:
             _running_jobs.pop(k, None)
 
@@ -469,6 +484,15 @@ def _finish_job(job: _BacktestJob, *, result=None, error: str | None = None) -> 
     timer = threading.Timer(_JOB_TTL, _expire)
     timer.daemon = True
     timer.start()
+
+
+def _reject_job(job: _BacktestJob, message: str) -> None:
+    """入参被拒时给作业一个终态, 避免条目永久滞留在 _running_jobs。
+
+    只在作业尚未启动时生效: 同 key 的运行中作业 (如守卫开关中途翻转) 不得被误终结。
+    """
+    if not job.started:
+        _finish_job(job, error=message)
 
 
 def _make_job_key(
@@ -572,6 +596,7 @@ async def strategy_stream(
     async def event_generator():
         # 范围保护: 直接报错
         if guard_violated:
+            _reject_job(job, BACKTEST_SERVER_GUARD_MESSAGE)
             yield f"event: error\ndata: {json.dumps({'message': BACKTEST_SERVER_GUARD_MESSAGE}, ensure_ascii=False)}\n\n"
             return
 
@@ -580,6 +605,7 @@ async def strategy_stream(
             capset = request.app.state.capabilities
             from app.tickflow.capabilities import Cap
             if not capset.has(Cap.KLINE_MINUTE_BATCH):
+                _reject_job(job, '分钟K精确回测需要 Pro+ 权限 (kline.minute.batch)')
                 yield f"event: error\ndata: {json.dumps({'message': '分钟K精确回测需要 Pro+ 权限 (kline.minute.batch)'}, ensure_ascii=False)}\n\n"
                 return
             # 检查本地分钟K历史是否覆盖回测区间
@@ -588,6 +614,7 @@ async def strategy_stream(
             if earliest_minute is not None and start_date < earliest_minute:
                 msg = (f"本地分钟K历史最早到 {earliest_minute}, 无法覆盖回测起始日 {start_date}。"
                        f"请先用「扩展分钟K历史」功能拉取更多数据, 或缩小回测区间。")
+                _reject_job(job, msg)
                 yield f"event: error\ndata: {json.dumps({'message': msg}, ensure_ascii=False)}\n\n"
                 return
 
@@ -642,6 +669,7 @@ async def strategy_stream(
                     _finish_job(job, error=str(e))
 
             # 启动后台线程 (不阻塞事件循环)
+            job.started = True
             threading.Thread(target=_run_backtest, daemon=True).start()
 
         # 订阅进度: 用读指针读 job.progress 列表 (多连接互不干扰)
@@ -881,6 +909,7 @@ async def optimize_stream(
         yield f"event: job\ndata: {json.dumps({'key': job_key}, ensure_ascii=False)}\n\n"
 
         if guard_violated:
+            _reject_job(job, BACKTEST_SERVER_GUARD_MESSAGE)
             yield f"event: error\ndata: {json.dumps({'message': BACKTEST_SERVER_GUARD_MESSAGE}, ensure_ascii=False)}\n\n"
             return
 
@@ -947,6 +976,7 @@ async def optimize_stream(
                     except Exception as e:
                         _finish_job(job, error=str(e))
 
+                job.started = True
                 threading.Thread(target=_run_opt, daemon=True).start()
 
         cursor = 0
@@ -1108,6 +1138,7 @@ async def walkforward_stream(
 
         if wf_guard_violated:
             msg = f"单折窗口最多 {BACKTEST_MAX_SERVER_DAYS} 天 (当前 train/test 更大), 请减小训练/测试窗口或在更大内存环境运行。"
+            _reject_job(job, msg)
             yield f"event: error\ndata: {json.dumps({'message': msg}, ensure_ascii=False)}\n\n"
             return
 
@@ -1117,9 +1148,7 @@ async def walkforward_stream(
             except (json.JSONDecodeError, TypeError):
                 grid = None
             if not isinstance(grid, dict) or not grid:
-                job.error = "param_grid 必须是非空的参数网格对象"
-                job.done = True
-                job.finish_ts = time.time()
+                _finish_job(job, error="param_grid 必须是非空的参数网格对象")
                 grid = None
 
             if grid is not None:
@@ -1175,6 +1204,7 @@ async def walkforward_stream(
                     except Exception as e:
                         _finish_job(job, error=str(e))
 
+                job.started = True
                 threading.Thread(target=_run_wf, daemon=True).start()
 
         cursor = 0
