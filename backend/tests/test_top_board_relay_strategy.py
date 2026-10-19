@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import date
 
+import numpy as np
 import polars as pl
 
 from app.backtest.matrix import (
@@ -13,6 +14,8 @@ from app.strategy.seeds import top_board_relay
 
 DAY1 = date(2024, 1, 2)
 DAY2 = date(2024, 1, 3)
+DAY3 = date(2024, 1, 4)
+DAY4 = date(2024, 1, 5)
 
 _SHAPES = {
     "swing": lambda close: (close * 0.97, close, close * 0.96),
@@ -29,7 +32,7 @@ def _market(rows: list[dict]):
     high  覆盖当日最高价, 用于「盘中触板但收盘未封住」场景。
     shape 决定当日 K 线形态(默认 swing):
       swing     — 开高低收不等价, 盘中可成交的换手板
-      one_price — 全天单一价格, 一字板(撮合层拒绝买入, 策略按「一字顶死」剔除)
+      one_price — 全天单一价格, 一字板(买入日按买不到处理; 连续 3 个才剔出梯队)
       t_open    — 一字开盘、盘中开板后回封的 T 字板(仍可成交, 不剔除)
 
     不复权原始价与复权价取同一组数值(测试数据无除权), 使「触板」判定简化为
@@ -164,20 +167,87 @@ def test_engine_basic_filter_can_drop_the_only_entry():
     assert _entry(5e7).tolist() == [[0], [1]]
 
 
-def test_one_price_top_board_is_skipped_for_next_board():
-    """最高标一字顶死买不进去 => 不进梯队, 龙头落到次高标, 由次高标次日进板触发买入。"""
+def test_two_one_price_boards_are_still_relayable():
+    """连续 2 个一字板仍留在梯队: 第 3 日开板(T 字板)回封即可按涨停价成交。
+
+    用户口径: 只有「前面连续 3 个一字顶死」才不接力. 连续第 1/2 个一字板都留在
+    梯队里; 下一日只要盘中开过板(T 字板, low < 涨停价), 就是可成交的打板单。
+    """
     market = _market([
-        # 5 板且一字顶死: 买不进去, 当最高标没有接力意义
-        {"symbol": "000001.SZ", "date": DAY1, "boards": 5, "turnover": 9.0, "close": 10.0,
+        # 第 1 个一字板: 3 板, 留在梯队且是龙头
+        {"symbol": "000001.SZ", "date": DAY1, "boards": 3, "turnover": 9.0, "close": 10.0,
          "locked": True, "shape": "one_price"},
-        # 次高标 4 板, 可成交 => 当日龙头
-        {"symbol": "600000.SH", "date": DAY1, "boards": 4, "turnover": 3.0, "close": 20.0, "locked": True},
-        {"symbol": "000001.SZ", "date": DAY2, "boards": 6, "turnover": 9.0, "close": 11.0, "locked": True},
-        {"symbol": "600000.SH", "date": DAY2, "boards": 5, "turnover": 3.0, "close": 22.0, "locked": True},
+        # 第 2 个一字板: 4 板, 仍在梯队
+        {"symbol": "000001.SZ", "date": DAY2, "boards": 4, "turnover": 9.0, "close": 11.0,
+         "locked": True, "shape": "one_price"},
+        # 第 3 日开板后回封(T 字板): 5 板, 可成交
+        {"symbol": "000001.SZ", "date": DAY3, "boards": 5, "turnover": 9.0, "close": 12.1,
+         "locked": True, "shape": "t_open"},
+    ])
+
+    assert _selected(market) == ["000001.SZ"]
+    # 阈值 2(或 1)时, 第 2 个(第 1 个)一字日即被剔出梯队 => 第 3 日无买点
+    assert _selected(market, {"one_price_skip_streak": 2}) == []
+    assert _selected(market, {"one_price_skip_streak": 1}) == []
+
+
+def test_one_price_streak_resets_on_non_one_price_day():
+    """连续一字计数遇非一字日归零, 用于验证触发阈值前的重置行为。"""
+    mask = np.array(
+        [
+            [True, False],
+            [True, True],
+            [False, True],
+            [True, True],
+        ]
+    )
+
+    assert top_board_relay._one_price_streak(mask).tolist() == [
+        [1, 0],
+        [2, 1],
+        [0, 2],
+        [1, 3],
+    ]
+
+
+def test_one_price_entry_day_is_unbuyable():
+    """买入日仍是一字板(全天未开板) => 按买不到处理, 不产生入场信号。
+
+    一字板买队排不进; 只有盘中开过板再回封的 T 字板才算买入成功。
+    """
+    market = _market([
+        {"symbol": "000001.SZ", "date": DAY1, "boards": 3, "turnover": 9.0, "close": 10.0,
+         "locked": True, "shape": "one_price"},
+        {"symbol": "000001.SZ", "date": DAY2, "boards": 4, "turnover": 9.0, "close": 11.0,
+         "locked": True, "shape": "one_price"},
+    ])
+
+    assert _selected(market) == []
+
+
+def test_three_consecutive_one_price_boards_are_skipped():
+    """连续 3 个一字顶死才不接力: 龙头落到次高标, 由次高标次日触板触发买入。"""
+    market = _market([
+        # A: 连续 3 个一字板(3/4/5 板), 第 3 个一字日被剔出梯队
+        {"symbol": "000001.SZ", "date": DAY1, "boards": 3, "turnover": 9.0, "close": 10.0,
+         "locked": True, "shape": "one_price"},
+        {"symbol": "600000.SH", "date": DAY1, "boards": 2, "turnover": 3.0, "close": 20.0, "locked": True},
+        {"symbol": "000001.SZ", "date": DAY2, "boards": 4, "turnover": 9.0, "close": 11.0,
+         "locked": True, "shape": "one_price"},
+        {"symbol": "600000.SH", "date": DAY2, "boards": 3, "turnover": 3.0, "close": 22.0, "locked": True},
+        {"symbol": "000001.SZ", "date": DAY3, "boards": 5, "turnover": 9.0, "close": 12.1,
+         "locked": True, "shape": "one_price"},
+        {"symbol": "600000.SH", "date": DAY3, "boards": 4, "turnover": 3.0, "close": 24.2, "locked": True},
+        # 第 4 日: A 开板回封(T 字板, 6 板), B 进 5 板 => 默认口径只打 B
+        {"symbol": "000001.SZ", "date": DAY4, "boards": 6, "turnover": 9.0, "close": 13.31,
+         "locked": True, "shape": "t_open"},
+        {"symbol": "600000.SH", "date": DAY4, "boards": 5, "turnover": 3.0, "close": 26.62, "locked": True},
     ])
 
     assert _selected(market) == ["600000.SH"]
-    # 关掉一字剔除后, 一字顶死的 5 板重新当龙头
+    # 阈值放宽到 4 后, 3 连一字仍可接力 => A 重新当龙头
+    assert _selected(market, {"one_price_skip_streak": 4}) == ["000001.SZ"]
+    # 关掉一字限制 => 同样回到 A
     assert _selected(market, {"skip_one_price_leader": False}) == ["000001.SZ"]
 
 
@@ -193,6 +263,17 @@ def test_intraday_opened_board_is_not_one_price():
     ])
 
     assert _selected(market) == ["000001.SZ"]
+
+    # 直接断言形态判定本身: t_open 不是一字顶死(否则买入日会被按买不到处理)
+    t_board = _market([
+        {"symbol": "000001.SZ", "date": DAY1, "boards": 5, "turnover": 3.0, "close": 10.0,
+         "locked": True, "shape": "t_open"},
+    ])
+    idx = t_board.symbols.index("000001.SZ")
+    one_price = top_board_relay._one_price_limit_up(
+        t_board, t_board.limit_up_locked.astype(bool)
+    )
+    assert not bool(one_price[0, idx])
 
 
 def test_top_board_above_cap_is_skipped_for_next_board():
@@ -234,11 +315,10 @@ def test_risk_warning_leader_is_skipped_for_next_leader():
 
 
 def test_touched_but_not_sealed_leader_does_not_enter_by_default():
-    """默认必须收盘封板才买: 盘中触板但收盘没封住(炸板)不买。
+    """默认只认收盘封板: 盘中触板但收盘炸板不算入场(require_seal=True)。
 
-    实测(2024-01..2026-10, 全市场, max_positions=10): 放宽成「触板即买」把累计收益从
-    +90.8% 打到 -41.7%, 胜率 46.0%→33.6%, 最大回撤 -7.6%→-43.9%。触板未封的板大多是
-    「炸板」弱板, 按涨停价买进去等于买在情绪顶 —— 故默认保留「封板才买」, 触板仅作可选开关。
+    ⚠ 该口径含未来函数(收盘才知是否封住), 当前按用户要求保留为默认;
+    置 require_seal=False 可切换到「盘中触板即买」的因果口径。
     """
     market = _market([
         {"symbol": "600664.SH", "name": "哈药股份", "date": DAY1, "boards": 3, "turnover": 5.0,
@@ -249,7 +329,7 @@ def test_touched_but_not_sealed_leader_does_not_enter_by_default():
     ])
 
     assert _selected(market) == []
-    # 显式关掉才放宽为「触板即买」
+    # 显式关闭「仅收盘封板」后, 触板即买
     assert _selected(market, {"require_seal": False}) == ["600664.SH"]
 
 
@@ -281,10 +361,10 @@ def test_meta_declares_limit_price_fill():
 
 
 def test_params_expose_new_switches():
-    """两个新增开关必须出现在 META.params 里(前端按 META 渲染, 用户可自行改口径)。
+    """开关必须出现在 META.params 里(前端按 META 渲染, 用户可自行改口径)。
 
-    默认值都是**实测占优**的一侧: 剔 ST 为 True(显著提高收益/降低回撤),
-    require_seal 为 True(放宽触板会大幅亏损, 见上一个用例)。
+    require_seal 默认 True: 按用户要求先只改规则 2, 封板买入口径保持不变;
+    置 False 可切换到盘中触板即买(见上一个用例)。
     """
     params = {p["id"]: p for p in top_board_relay.META["params"]}
 
@@ -292,6 +372,8 @@ def test_params_expose_new_switches():
     assert params["skip_st"]["default"] is True
     assert params["require_seal"]["type"] == "bool"
     assert params["require_seal"]["default"] is True
+    assert params["one_price_skip_streak"]["type"] == "int"
+    assert params["one_price_skip_streak"]["default"] == 3
 
 
 def test_module_declares_prev_close_stop_constants():

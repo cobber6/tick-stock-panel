@@ -36,7 +36,10 @@ META = {
     # 价格买到打板单, 会系统性高估收益。清仓仍按「信号日收盘」。
     # 回测页默认口径是「次日开盘」, 会把打板单推迟到次日开盘(次日低开低走也照样成交)。
     # 前端选中本策略时自动套用, 用户仍可在回测页手动覆盖。
-    "backtest_defaults": {"entry_fill": "high_t", "exit_fill": "close_t"},
+    "backtest_defaults": {
+        "entry_fill": "high_t",
+        "exit_fill": "close_t",
+    },
     "params": [
         {
             "id": "min_top_boards",
@@ -56,9 +59,18 @@ META = {
             "max": 30,
             "step": 1,
         },
-        {"id": "skip_one_price_leader", "label": "一字顶死不接力", "type": "bool", "default": True},
+        {"id": "skip_one_price_leader", "label": "限制连续一字板接力", "type": "bool", "default": True},
+        {
+            "id": "one_price_skip_streak",
+            "label": "连续一字板达到几只后不接力",
+            "type": "int",
+            "default": 3,
+            "min": 1,
+            "max": 10,
+            "step": 1,
+        },
         {"id": "skip_st", "label": "剔除风险警示股", "type": "bool", "default": True},
-        {"id": "require_seal", "label": "仅收盘封板才买（关闭则触板即买）", "type": "bool", "default": True},
+        {"id": "require_seal", "label": "仅收盘封板才买（实验：关闭则触板即买）", "type": "bool", "default": True},
         {
             "id": "exit_weak_seal",
             "label": "放量换手涨停当日离场",
@@ -111,26 +123,43 @@ TRAILING_STOP = -0.005
 RULES = """
 1. 每个交易日先构造「可接力梯队」, 再取其中连板数最高的一只作为「最高板龙头」。
    进梯队的条件: 当日有行情、连板数不超过 max_top_boards(默认 5 板, 见第 3 条)、
-   不是风险警示股(默认剔除, 见第 4 条)、且当日不是「一字顶死」(见第 2 条)。
+   不是风险警示股(默认剔除, 见第 4 条)、且连续一字板数未达到上限(见第 2 条)。
    梯队最高板须达到 min_top_boards(默认 2 板), 达不到则当日不参与。
-2. 一字顶死的股票不进梯队, 直接看次高标。一字顶死 = 当日开=高=低=收 且收盘封住涨停
-   (口径与撮合层拒绝买入的判定一致): 这种板买不进去, 当最高标没有接力意义。
-   判定基于**当日**形态 —— 前几日一字、当日已开板换手的(T 字板)仍算可接力。
+2. 只有**连续 3 个一字顶死**(阈值 one_price_skip_streak, 默认 3)才不接力, 直接看次高标;
+   连续 1~2 个一字板仍留在梯队里, 保留继续接力的资格 —— 但买入日若仍是一字板
+   (全天未开板, 买不进), 按买不到处理, 该笔信号作废; 只有盘中开过板再回封的 T 字板
+   才算买入成功(见第 6 条)。
+   一字顶死 = 当日开=高=低=收 且收盘封住涨停(口径与撮合层一致)。
+   判定基于**当日**形态 —— 前几日一字、当日已开板换手的(T 字板)同样算可接力;
+   连续天数按交易日逐日计数, 中途未封板或停牌即归零。
+   ⚠ 实测(2024-01-01..2026-10-16, 全市场, max_positions=10, 封板买入口径,
+   一字未开板按买不到处理): 1 个一字即剔除 +80.99% / 胜率 24.17% / 回撤 -3.93% /
+   Sharpe 3.00; 允许连续 1~2 个一字板留在梯队 +94.36% / 胜率 24.90% /
+   回撤 -5.52% / Sharpe 3.07。
 3. 板数过高的最高标同样不进梯队(默认 >5 板)。连板数堆到 10 板以上的票, 位置太高、
    没有博弈空间, 用户口径是「完全没法下手」, 此时看次高标。
 4. 风险警示股(ST/*ST)默认剔除出梯队。ST 的连板天梯与主板是两个博弈池, 「最高标」的
    口径按非 ST 股的连板高度算 —— 否则一只 ST 的 5 板会把真正的最高标(如 3 板)顶掉,
    该买的票反而买不到。置 skip_st=False 回到旧口径(不剔除)。
-5. 次日(买入日)昨日的最高板龙头**收盘封住涨停**才打板买入(默认)。
-   触板口径与撮合层算「封板」完全同源: 在**不复权原始价**空间上, 用当日最高价与按
-   交易所规则算出的涨停价比较(前收整数分半进位; 除权日改用前复权前收作参考价)。
-   置 require_seal=False 可放宽为「盘中触及涨停即买」, 不要求收盘封住。
-   ⚠ 实测(2024-01..2026-10, 全市场, max_positions=10): 放宽触板把累计收益从 +90.8%
-   打到 -41.7%, 胜率 46.0%→33.6%, 最大回撤 -7.6%→-43.9%。触板未封的板大多是「炸板」
-   弱板, 按涨停价买进去等于买在情绪顶 —— 故默认仍要求收盘封板, 触板仅作可选开关。
-6. 成交价口径: 当日最高价(META.backtest_defaults 的 entry_fill=high_t)。触板日的最高价
-   就是涨停价, 封板日 high == close == 涨停价 —— 两种触发口径下都等于打板成交价。
-   买入日当天是一字板的仍由撮合层按「涨停不可成交」拒绝, 买不进就不买。
+5. 次日(买入日)昨日的最高板龙头**收盘封板**才打板买入(默认 require_seal=True)。
+   ⚠ 该口径含未来函数: 收盘是否封住只有收盘后才知道, 而成交价是当日涨停价 ——
+   以封板为条件等于用未来信息只保留「封板成功」的样本, 打板封板率被抬成 100%。
+   真实打板只能在盘中触板那一刻排队, 之后是否封住属于未知。故本口径的回测收益
+   系统性偏高, 只能作为「事后筛选」的上界参考, 不能当作可实现的业绩。
+   触板口径的实现在 _limit_up_touched: 与撮合层算「封板」完全同源, 在**不复权原始价**
+   空间上用当日最高价与按交易所规则算出的涨停价比较(前收整数分半进位; 除权日改用
+   前复权前收作参考价)。置 require_seal=False 可切换到「盘中触板即买」的因果口径;
+   ⚠ 实测(2024-01-01..2026-10-16, 全市场, max_positions=10, 规则 2 同为默认 3 连剔除):
+   封板口径 +94.36% / 胜率 24.90% / 回撤 -5.52% / Sharpe 3.07; 触板口径 -69.61% /
+   胜率 16.76% / 回撤 -69.91% / Sharpe -3.74。两者之差主要是未来函数贡献的虚高。
+6. 成交价口径: 当日最高价(META.backtest_defaults 的 entry_fill=high_t)。封板日
+   high == close == 涨停价, 就是打板成交价。
+   买入日当天是**一字板(全天未开过板)**的, 按买不到处理: 一字板买队排不进, 该笔
+   入场信号直接作废、不产生持仓(撮合层同样拒单一字板)。若当天盘中开过板、随后又
+   封住涨停(T 字板), 则视为买入成功, 按涨停价成交。跌停一字板卖不掉时, 引擎会挂起
+   卖出意向, 打开后再成交。
+   ⚠ 本屏蔽按「信号日当天成交」(entry_fill=high_t / close_t)口径定义; 若在回测页
+   强制改成次日开盘(open_t+1), 信号日形态已不决定成交价, 本屏蔽会偏严, 仅作参考。
 7. 并列最高板(如昨日 4/4) 只打一只: 在当日成功触板的并列龙头中, 取**买入日当天**
    换手率最高的一只。
 8. 退出规则(一) —— 第二天不封板必走(最重要): 持有期每个交易日收盘仍未封住涨停, 即当日
@@ -141,7 +170,8 @@ RULES = """
    绿盘的按止损线成交。理由是最高标龙头不能弱到连红盘都维持不住。实现方式见模块常量
    STOP_LOSS / TRAILING_STOP 的注释(由引擎风控线给出触发价成交, 不经过收盘价)。
    ⚠ 该规则同时会在「盘中炸板、尾盘又回封涨停」的日子提前离场, 等于把当天的涨停让给
-   市场 —— 这是它的主要代价。实测(2024-01..2026-10, 全市场, max_positions=10, 规则(三)关闭):
+   市场 —— 这是它的主要代价。规则 2 优化前实测(2024-01..2026-10, 全市场,
+   max_positions=10, 规则(三)关闭):
    不启用本规则时 +142.2% / 胜率 47.2% / 回撤 -7.3% / Sharpe 2.75 / PF 2.43(231 笔, 全为 signal);
    启用后 +80.1% / 胜率 24.0% / 回撤 -3.4% / Sharpe 2.99 / PF 8.00(238 笔: stop_loss 178、
    trailing_stop 49、signal 11)。即用约一半的累计收益换掉一半的回撤, 净值曲线更平。
@@ -155,14 +185,17 @@ RULES = """
     这一半。置 exit_weak_seal=False 可关闭。
     注: 该规则与规则(二)高度重叠 —— 放量换手的封板日绝大多数盘中都跌破过前收盘价, 会先被
     规则(二)在止损线上卖掉, 只有「从没跌破前收盘价又放量换手」的封板日才轮到本条。
-    实测(同窗口, 规则(二)关闭): 只开本规则 +142.2%→+132.2%(成交 231→232 笔); 与规则(二)同开
+    规则 2 优化前实测(同窗口, 规则(二)关闭): 只开本规则 +142.2%→+132.2%(成交 231→232 笔); 与规则(二)同开
     +80.1%→+81.9%(238→238 笔)。影响量级在噪声内。原因: 换手率 >= 40% 的封板日只占全部封板日
     的 0.73%(335/46245), 且其中约 3/4 盘中已跌破前收盘、被规则(二)先在止损线上收掉。
     注: 本规则的离场走 exit_mask, 在 exit_reason 里记为 signal, 无法与规则(一)在明细上区分。
 11. 口径近似: 原规则为「14:30 未涨停则卖出」, 回测引擎无盘中定时出场能力, 规则(一)以
-    「收盘未封板」近似 —— 尾盘炸板会多持有一天, 尾盘拉板会提前一天卖出。另: 触板入场
-    假设板上排队能成交, 实际打板可能排不上队; 撮合层只拒绝「一字顶死」这一天买不进的形态。
-    (require_seal=False 时)触板入场后若当日未封板, 卖出信号当日即成立, 由 T+1 顺延到次一交易日收盘成交。
+    「收盘未封板」近似 —— 尾盘炸板会多持有一天, 尾盘拉板会提前一天卖出。另: 封板买入
+    假设板上排队能成交, 实际打板可能排不上队; 买入日一字未开板按买不到处理(见第 6 条)。
+    触板入场后若当日未封板, 卖出信号当日即成立, 由 T+1 顺延到次一交易日收盘成交。
+    当前默认口径(封板买入 + 3 连一字才剔 + 一字未开板买不到)实测:
+    +94.36% / 胜率 24.90% / 回撤 -5.52% / Sharpe 3.07 / PF 8.26 (261 笔, 同窗口同仓位)。
+    其中「封板买入」仍偏乐观(收盘才知是否封住, 见第 5 条), 实盘收益需打折看待。
 """
 
 
@@ -187,6 +220,7 @@ class TopBoardRelayMatrixStrategy:
         min_top_boards = max(1, int(params.get("min_top_boards", 2)))
         max_top_boards = max(min_top_boards, int(params.get("max_top_boards", 5)))
         skip_one_price = bool(params.get("skip_one_price_leader", True))
+        one_price_skip_streak = max(1, int(params.get("one_price_skip_streak", 3)))
         skip_st = bool(params.get("skip_st", True))
         require_seal = bool(params.get("require_seal", True))
         exit_weak_seal = bool(params.get("exit_weak_seal", True))
@@ -198,15 +232,19 @@ class TopBoardRelayMatrixStrategy:
         turnover = matrix_feature(market, "turnover_rate")
         locked = market.limit_up_locked.astype(bool)
 
-        # 可接力梯队: 有行情、板数不超上限、非风险警示股、且当日不是一字顶死(买不进去的板
-        # 当最高标没意义)。被这些条件筛掉的票不占最高标位置, 龙头自然落到次高标。
-        # 停牌/无数据行同样不参与。
+        # 可接力梯队: 有行情、板数不超上限、非风险警示股、且连续一字板数未达上限。
+        # 被这些条件筛掉的票不占最高标位置, 龙头自然落到次高标。停牌/无数据行同样不参与。
+        # 一字板只在**连续**达到阈值时才剔除: 1~2 个一字板仍留在梯队, 等次日开板
+        # (T 字板)时再打; 连续 3 个及以上位置太顶, 不再接力。
+        one_price = _one_price_limit_up(market, locked)
+        one_price_streak = _one_price_streak(one_price)
+
         has_bar = np.isfinite(streak)
         eligible = has_bar & (streak <= max_top_boards)
         if skip_st:
             eligible &= ~_risk_warning_mask(market)
         if skip_one_price:
-            eligible &= ~_one_price_limit_up(market, locked)
+            eligible &= one_price_streak < one_price_skip_streak
 
         market_top = np.where(eligible, streak, -np.inf).max(axis=1)
         leader = eligible & (streak == market_top[:, None])
@@ -218,7 +256,7 @@ class TopBoardRelayMatrixStrategy:
         top_prev = np.full(n_times, -np.inf, dtype=np.float64)
         top_prev[1:] = market_top[:-1]
 
-        # 昨日最高板龙头今日封板(默认)或触板(require_seal=False) => 进 min_top_boards+1 板, 打板买入。
+        # 昨日最高板龙头今日收盘封板(默认)或盘中触板(require_seal=False) => 打板买入。
         trigger = locked if require_seal else _limit_up_touched(market, locked)
         entry = (
             trigger
@@ -226,6 +264,9 @@ class TopBoardRelayMatrixStrategy:
             & leader_prev
             & (top_prev >= min_top_boards)[:, None]
         )
+        # 一字板(全天未开板)买不进: 按「买不到」处理, 直接作废该笔入场信号。
+        # 盘中开过板再回封的 T 字板 low < 涨停价, 不属于 one_price, 照常成交。
+        entry &= ~one_price
         entry = _narrow_to_single(entry, turnover)
 
         # ── 退出规则 ────────────────────────────────────────────────────────
@@ -363,6 +404,20 @@ def _one_price_limit_up(market: MarketDataMatrix, locked: np.ndarray) -> np.ndar
     spread = np.where(finite, prices.max(axis=0) - prices.min(axis=0), np.inf)
     tolerance = np.maximum(np.abs(prices[3]) * 1e-4, 0.01)
     return locked & market.tradable.astype(bool) & finite & (spread <= tolerance)
+
+
+def _one_price_streak(one_price: np.ndarray) -> np.ndarray:
+    """连续「一字顶死」天数(含当日), 非一字日归零, 形状与矩阵一致。
+
+    停牌/无数据日不是一字板, 会把连续性打断 —— 这是保守方向: 宁可少剔一只,
+    也不把「停牌前的一字板」和「复牌后的一字板」当成连续。
+    """
+    streak = np.zeros(one_price.shape, dtype=np.int16)
+    running = np.zeros(one_price.shape[1], dtype=np.int16)
+    for time_id in range(one_price.shape[0]):
+        running = np.where(one_price[time_id], running + 1, 0)
+        streak[time_id] = running
+    return streak
 
 
 def _turnover_at_least(turnover: np.ndarray, threshold: float) -> np.ndarray:
