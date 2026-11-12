@@ -388,3 +388,42 @@ def test_limit_down_recovery_uses_raw_low_under_later_ex_div():
     assert day2["signal_limit_down_recovery"][0] is False
     day3 = df.filter(pl.col("date") == date(2024, 1, 4))
     assert day3["signal_limit_down_recovery"][0] is True
+
+
+def test_limit_up_reference_on_ex_date_scaled_back_to_raw_price():
+    """除权日的涨跌停参考价必须折算回原始价空间。
+
+    day2 是一次小额除权 (ex_factor=1.001, 原始价 10.00→10.50, 仅 +5%, 不是涨停);
+    day3 才是大幅除权 (ex_factor=1.4)。因为 day3 的存在, day2 的前复权缩放系数
+    ratio = close/raw_close ≈ 0.714 —— 若把前复权昨收 (≈7.14) 直接当参考价,
+    day2 的 +5% 会被误判成涨停。参考价须 ÷ ratio 折回原始价空间 (≈9.99)。
+    """
+    raw = pl.DataFrame({
+        "symbol": ["600001.SH"] * 3,
+        "date": [date(2024, 1, 2), date(2024, 1, 3), date(2024, 1, 4)],
+        "open": [10.00, 10.20, 8.25],
+        "high": [10.00, 10.50, 8.25],
+        "low": [10.00, 10.10, 8.25],
+        "close": [10.00, 10.50, 8.25],
+        "volume": [10000.0, 10000.0, 10000.0],
+        "amount": [1.0e7, 1.0e7, 1.0e7],
+    })
+    factors = pl.DataFrame({
+        "symbol": ["600001.SH", "600001.SH"],
+        "trade_date": [date(2024, 1, 3), date(2024, 1, 4)],
+        "ex_factor": [1.001, 1.4],
+    })
+    instruments = pl.DataFrame({
+        "symbol": ["600001.SH"],
+        "name": ["普通股"],
+        "float_shares": [1.0e8],
+    })
+
+    df = pipeline.compute_enriched(raw, factors=factors, instruments=instruments).sort("date")
+
+    day2 = df.filter(pl.col("date") == date(2024, 1, 3))
+    assert day2["consecutive_limit_ups"][0] == 0, "除权日 +5% 不得被判涨停"
+    assert day2["limit_up_price"][0] == pytest.approx(10.99, abs=0.02)
+
+    day3 = df.filter(pl.col("date") == date(2024, 1, 4))
+    assert day3["consecutive_limit_ups"][0] == 1, "除权日按除权参考价真涨停仍须识别"

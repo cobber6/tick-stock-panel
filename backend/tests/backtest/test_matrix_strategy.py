@@ -1137,3 +1137,32 @@ def test_strategy_engine_run_all_builds_one_shared_matrix():
     assert build.call_count == 1
     assert results["macd_golden"].total == 1
     assert results["macd_copy"].total == 1
+
+
+def test_limit_lock_reference_on_ex_date_scaled_back_to_raw_price():
+    """撮合层封板矩阵在除权日同样要把参考价折回原始价空间。
+
+    t2 小额除权 (ex_factor=1.001, 原始 10.00→10.50, +5%, 非涨停);
+    t3 大幅除权 (ex_factor=1.4)。t2 的前复权缩放系数 ≈0.714, 若用前复权昨收
+    当参考价会把 +5% 误判成封板; 折回原始价后 10.50 < 10.99, 不封板。
+    t3 按除权参考价 7.50 真涨停 (8.25), 须识别。
+    """
+    import numpy as np
+
+    from app.backtest.matrix import _limit_lock_matrices
+
+    close = np.array([[10.00 / 1.4014], [10.50 * 1.001 / 1.4014], [8.25]], dtype=np.float64)
+    raw_close = np.array([[10.00], [10.50], [8.25]], dtype=np.float64)
+    seen = np.ones((3, 1), dtype=bool)
+    up, _down = _limit_lock_matrices(
+        close,
+        raw_close,
+        seen,
+        [date(2024, 1, 2), date(2024, 1, 3), date(2024, 1, 4)],
+        ["600001.SH"],
+        ["普通股"],
+        {"limit_up": np.array([np.nan]), "limit_down": np.array([np.nan])},
+        apply_latest_limits=False,
+    )
+    assert up[1, 0] == 0, "除权日 +5% 不得判封板"
+    assert up[2, 0] == 1, "除权参考价下的真涨停须识别"

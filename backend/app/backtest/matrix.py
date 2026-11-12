@@ -2199,8 +2199,17 @@ def _limit_lock_matrices(
             np.isfinite(current_adjustment)
             & np.isfinite(previous_adjustment)
             & (np.abs(current_adjustment - previous_adjustment) > 1e-6)
+            & (current_adjustment > 0)
         )
-        reference = np.where(adjustment_changed, previous_close, previous_raw)
+        # 除权日的交易所参考价 = 昨收 / 当日除权因子, 是原始价空间里的价格。
+        # 前复权昨收 previous_close 与今日原始价 current_raw 差一个缩放系数
+        # current_adjustment = close/raw_close(该日之后还有除权事件时明显小于 1),
+        # 必须除以它折算回原始价空间, 否则该类除权日会被误判涨停。
+        reference = np.where(
+            adjustment_changed,
+            previous_close / np.where(adjustment_changed, current_adjustment, 1.0),
+            previous_raw,
+        )
         valid = (
             present
             & np.isfinite(reference)

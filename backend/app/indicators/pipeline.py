@@ -785,8 +785,13 @@ def compute_limit_signals(
         df = df.with_columns(pl.lit(None).cast(pl.Float64).alias("turnover_rate"))
 
     # 前一日参考收盘价（交易所涨跌停基准价）
-    # 仅在 adj_factor 发生变化（除权除息 XD/DR）时使用前复权昨收作为交易所参考价;
+    # 仅在 adj_factor 发生变化（除权除息 XD/DR）时使用前复权昨收折算成今日原始价空间;
     # 否则使用原始 raw_close.shift(1) 以避免浮点精度误差。
+    #
+    # 除权日的交易所参考价 = 昨收 / 当日除权因子, 是原始价空间里的除权参考价。
+    # 直接把前复权昨收 close.shift(1) 当参考价, 却拿今日原始价 raw_close 去比较,
+    # 两者差一个前复权缩放系数 ratio = close/raw_close(该日之后还有除权事件时
+    # ratio 明显小于 1), 当日只要涨幅够大就会被误判涨停。故须再 ÷ 今日 ratio。
     if not need_price_limits:
         cleanup = [c for c in ("name", "float_shares", "limit_up", "limit_down", "listing_date") if c in df.columns]
         return df.drop(cleanup)
@@ -795,8 +800,9 @@ def compute_limit_signals(
     _adj_yesterday = pl.col("close").shift(1).over("symbol") / pl.col("raw_close").shift(1).over("symbol")
     _adj_changed = (_adj_today - _adj_yesterday).abs() > 1e-6
     df = df.with_columns(
-        pl.when(_adj_changed)
-        .then(pl.col("close").shift(1).over("symbol"))   # 除权: 使用前复权昨收
+        pl.when(_adj_changed & (_adj_today > 0))
+        # 除权: 前复权昨收 ÷ 今日复权缩放系数 = 今日原始价空间里的除权参考价
+        .then(pl.col("close").shift(1).over("symbol") / _adj_today)
         .otherwise(pl.col("raw_close").shift(1).over("symbol"))  # 正常: 使用原始昨收
         .alias("_prev_raw_close")
     )
@@ -1877,10 +1883,31 @@ def _load_recent_history(enriched_base: Path, symbols: list[str], days: int) -> 
         hist_cols = [c for c in ["symbol", "date", "open", "high", "low", "close",
                                  "volume", "amount", "raw_close", "raw_high", "raw_low"]
                     if c in lf.schema]
-        return lf.select(hist_cols).collect()
+        hist = lf.select(hist_cols).collect()
     except Exception as e:  # noqa: BLE001
         logger.warning("历史数据加载失败: %s", e)
         return pl.DataFrame()
+
+    # enriched 的 OHLC 是前复权价; 调用方 (compute_enriched) 会再乘一次复权因子。
+    # 直接拼接会让历史前缀被二次复权 (并且 compute_enriched 会用复权 close 覆盖
+    # raw_close, 使次日涨跌停的昨收基准失真), 因此这里先还原成原始价。
+    if hist.is_empty() or "raw_close" not in hist.columns:
+        return hist
+    ratio = (
+        pl.when(pl.col("raw_close") > 0)
+        .then(pl.col("close") / pl.col("raw_close"))
+        .otherwise(1.0)
+        .fill_null(1.0)
+    )
+    restored = [
+        (pl.col("open") / ratio).alias("open"),
+        pl.col("raw_high").alias("high") if "raw_high" in hist.columns
+        else (pl.col("high") / ratio).alias("high"),
+        pl.col("raw_low").alias("low") if "raw_low" in hist.columns
+        else (pl.col("low") / ratio).alias("low"),
+        pl.col("raw_close").alias("close"),
+    ]
+    return hist.with_columns(restored)
 
 
 def compute_enriched_single(daily_for_symbol: pl.DataFrame) -> pl.DataFrame:

@@ -78,6 +78,60 @@ def test_incremental_batches_preserve_values_and_generation(sample, tmp_path, mo
     assert get_enriched_generation(tmp_path) != generation
 
 
+def test_incremental_history_prefix_is_not_readjusted(tmp_path, monkeypatch):
+    """除权事件落在增量批次内时, 历史前缀不得被二次复权。
+
+    回归用例: 旧实现直接把 enriched 的前复权 close 拼进原始行一起复权,
+    compute_enriched 又用复权 close 覆盖 raw_close, 导致批次首日的昨收基准
+    偏低, 平盘涨幅也会被判成涨停 (consecutive_limit_ups 由 0 变 1)。
+    """
+    monkeypatch.setattr(preferences, "get_enriched_batch_size", lambda: 2)
+    monkeypatch.setattr(pipeline, "_custom_signal_exprs", {})
+    monkeypatch.setattr(pipeline, "_adaptive_sym_batch", lambda default, rows: 2)
+    symbol = "600000.SH"
+    start = date.today() - timedelta(days=12)
+    dates = [start + timedelta(days=i) for i in range(13)]
+    rows = []
+    for day, day_date in enumerate(dates):
+        close = round(10.0 + day * 0.1, 2)
+        rows.append({
+            "symbol": symbol, "date": day_date,
+            "open": close, "high": close + 0.05, "low": close - 0.05,
+            "close": close, "volume": 1000.0, "amount": 10000.0, "quote_ts": 0,
+        })
+    raw = pl.DataFrame(rows)
+    for frame in raw.partition_by("date"):
+        out = tmp_path / "kline_daily" / f"date={frame['date'][0]}" / "part.parquet"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        frame.write_parquet(out)
+    instruments = pl.DataFrame({
+        "symbol": [symbol], "name": ["stock"], "float_shares": [1000000.0],
+    })
+    # 除权事件安排在最后一天, 即增量批次内、历史前缀之后
+    factors = pl.DataFrame({
+        "symbol": [symbol], "trade_date": [dates[-1]], "ex_factor": [1.1],
+    })
+    for name, frame in (("instruments/all.parquet", instruments), ("adj_factor/all.parquet", factors)):
+        out = tmp_path / name
+        out.parent.mkdir(parents=True, exist_ok=True)
+        frame.write_parquet(out)
+
+    expected = pipeline._select_storage_cols(pipeline.compute_enriched(
+        raw, instruments=instruments, factors=factors,
+    )).sort("symbol", "date")
+    # 预置已存在的历史分区 (最后两天留给增量)
+    for frame in expected.filter(pl.col("date") < dates[-2]).partition_by("date"):
+        day = frame["date"][0]
+        out = tmp_path / "kline_daily_enriched" / f"date={day}" / "part.parquet"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        frame.write_parquet(out)
+
+    written = pipeline.run_pipeline(tmp_path, new_dates_only=True)
+    assert written == 2, "增量模式应只重算两个新日期, 不能退化为全量重建"
+    actual = pl.read_parquet(str(tmp_path / "kline_daily_enriched/**/*.parquet"))
+    assert_frame_equal(actual.sort("symbol", "date"), expected, check_exact=True)
+
+
 def test_failed_compute_batch_publishes_no_partial_new_dates(sample, tmp_path, monkeypatch):
     original_compute = pipeline.compute_enriched
     calls = 0
