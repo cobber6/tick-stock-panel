@@ -817,6 +817,10 @@ export type ExitFill = 'close_t' | 'open_t+1' | 'signal_next_minute'
 export interface StrategyBacktestDefaults {
   entry_fill?: EntryFill
   exit_fill?: ExitFill
+  // 仓位口径: 平均持仓远低于最大持仓数的策略(如打板策略), 单笔收益会被
+  // 1/max_positions 稀释, 需声明更集中的仓位, 否则回测反映的是现金空转。
+  max_positions?: number
+  max_exposure_pct?: number
 }
 
 export interface StrategyDetail {
@@ -1862,6 +1866,28 @@ export interface StrategyBacktestResult {
   }
   elapsed_ms: number
   error: string | null
+}
+
+/** 一次已落盘的回测记录摘要 (列表/对比用, 不含完整结果) */
+export interface BacktestHistoryItem {
+  id: string
+  created_at: string
+  run_id: string
+  strategy_id: string
+  strategy_name: string
+  asset_type: string
+  start: string
+  end: string
+  metrics: Record<string, number>
+  config: Record<string, any>
+  elapsed_ms: number | null
+  /** false 表示结果过大/缺失, 只能看指标摘要 */
+  has_result: boolean
+}
+
+/** 回测记录详情: 摘要 + 完整结果 (供查看/载入复看) */
+export interface BacktestHistoryDetail extends BacktestHistoryItem {
+  result: StrategyBacktestResult | null
 }
 
 // ===== Settings =====
@@ -3269,6 +3295,17 @@ export const api = {
 
   researchCandidateDelete: (id: string) =>
     request<{ ok: boolean }>(`/api/backtest/candidates/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+    }),
+
+  backtestHistory: () =>
+    request<{ items: BacktestHistoryItem[] }>('/api/backtest/history'),
+
+  backtestHistoryGet: (id: string) =>
+    request<BacktestHistoryDetail>(`/api/backtest/history/${encodeURIComponent(id)}`),
+
+  backtestHistoryDelete: (id: string) =>
+    request<{ ok: boolean }>(`/api/backtest/history/${encodeURIComponent(id)}`, {
       method: 'DELETE',
     }),
 

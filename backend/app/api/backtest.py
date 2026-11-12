@@ -318,6 +318,62 @@ def candidate_delete(candidate_id: str):
 
 
 # ================================================================
+# 回测历史 —— 每次成功的策略回测自动落盘
+# ================================================================
+
+def _history_store():
+    from app.backtest.history import BacktestHistoryStore
+
+    return BacktestHistoryStore(settings.data_dir)
+
+
+def _record_backtest_history(result) -> None:
+    """记录一次成功的策略回测。记录失败只告警, 不得影响回测结果返回。"""
+    try:
+        payload = result if isinstance(result, dict) else asdict(result)
+        if payload.get("error"):
+            return
+        _history_store().record(payload)
+    except Exception:  # noqa: BLE001 — 历史记录是旁路, 任何失败都不能影响回测结果
+        logger.warning("回测历史记录失败", exc_info=True)
+
+
+@router.get("/history")
+def history_list():
+    from app.backtest.history import BacktestHistoryError
+
+    try:
+        return {"items": _history_store().list()}
+    except BacktestHistoryError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.get("/history/{entry_id}")
+def history_get(entry_id: str):
+    from app.backtest.history import BacktestHistoryError
+
+    try:
+        return _history_store().get(entry_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="回测记录不存在") from exc
+    except BacktestHistoryError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.delete("/history/{entry_id}")
+def history_delete(entry_id: str):
+    from app.backtest.history import BacktestHistoryError
+
+    try:
+        _history_store().delete(entry_id)
+        return {"ok": True}
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="回测记录不存在") from exc
+    except BacktestHistoryError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+# ================================================================
 # 策略回测
 # ================================================================
 
@@ -413,7 +469,9 @@ def strategy_run(req: StrategyBacktestRequest, request: Request):
     from app.services.heavy_job_limiter import shared_heavy_job_limiter
 
     with shared_heavy_job_limiter.slot("normal"):
-        return run_worker_task(task)
+        result = run_worker_task(task)
+    _record_backtest_history(result)
+    return result
 
 
 # ── SSE 流式回测 (实时进度 + 可取消 + 支持重连) ───────────────────
@@ -662,6 +720,7 @@ async def strategy_stream(
                             lambda d: job.progress.append(d),
                             job.cancel_event,
                         )
+                    _record_backtest_history(result)
                     _finish_job(job, result=result)
                 except HeavyJobCancelledError:
                     _finish_job(job, error="回测已取消")

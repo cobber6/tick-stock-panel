@@ -35,10 +35,16 @@ META = {
     # 触板未封日 high == 涨停价而 close 已回落 —— 此时若按收盘成交, 等于用低于涨停价的
     # 价格买到打板单, 会系统性高估收益。清仓仍按「信号日收盘」。
     # 回测页默认口径是「次日开盘」, 会把打板单推迟到次日开盘(次日低开低走也照样成交)。
+    # 仓位口径: 本策略同时持仓的龙头通常只有 1~3 只(平均仅 ~0.5 个仓位, 大量时间空仓),
+    # 若沿用回测页默认的 max_positions=10, 每笔只分配 1/10 资金, 收益被稀释成「现金空转」。
+    # 3 个仓位是 2018-2026 全样本中**一笔信号都不丢**的最小值(与 mp=10 交易笔数完全一致),
+    # 单笔资金 1/3; 调大只是把收益按 1/max_positions 同比缩小, Sharpe 几乎不变。
     # 前端选中本策略时自动套用, 用户仍可在回测页手动覆盖。
     "backtest_defaults": {
         "entry_fill": "high_t",
         "exit_fill": "close_t",
+        "max_positions": 3,
+        "max_exposure_pct": 1.0,
     },
     "params": [
         {
@@ -196,6 +202,16 @@ RULES = """
     当前默认口径(封板买入 + 3 连一字才剔 + 一字未开板买不到)实测:
     +94.36% / 胜率 24.90% / 回撤 -5.52% / Sharpe 3.07 / PF 8.26 (261 笔, 同窗口同仓位)。
     其中「封板买入」仍偏乐观(收盘才知是否封住, 见第 5 条), 实盘收益需打折看待。
+12. 仓位口径: META.backtest_defaults 声明 max_positions=3 / max_exposure_pct=100%。
+    本策略同时持仓通常只有 1~3 只(平均仅 ~0.5 个仓位, 大量时间空仓), 回测页默认的
+    10 个仓位会把单笔资金压到 1/10, 收益被稀释成「现金空转」。实测 2018-2026 逐年,
+    max_positions=3 与 =10 的交易笔数完全一致(信号一笔不丢), 收益放大 3.8~4.7 倍
+    (2026: +14.11% → +53.20%), Sharpe 基本不变(2.47 → 2.49), 回撤同步放大
+    (单年 -2.51% → -8.06%)。用户仍可在回测页手动覆盖。
+    备选档位 mp=5(每笔 1/5 资金, 同时持满 5 只才占满资金, 余量更大): 逐年收益约为 mp=3
+    的 50%~56%, 单年最大回撤 -10.70%(2024, mp=3 为 -17.07%), Sharpe 与 mp=3 基本一致
+    (2026: mp=5 2.47 / mp=3 2.49); 交易笔数与 mp=3/10 完全相同。在回测页把「最大持仓数」
+    改成 5 即可。
 """
 
 
@@ -349,8 +365,14 @@ def _limit_up_touched(market: MarketDataMatrix, locked: np.ndarray) -> np.ndarra
             np.isfinite(factor)
             & np.isfinite(previous_factor)
             & (np.abs(factor - previous_factor) > 1e-6)
+            & (factor > 0)
         )
-        reference = np.where(factor_changed, previous_close, previous_raw)
+        # 除权日参考价 = 前复权昨收 ÷ 今日复权缩放系数, 折算回原始价空间后再与 raw_high 比
+        reference = np.where(
+            factor_changed,
+            previous_close / np.where(factor_changed, factor, 1.0),
+            previous_raw,
+        )
         high = raw_high[time_id]
         valid = (
             present

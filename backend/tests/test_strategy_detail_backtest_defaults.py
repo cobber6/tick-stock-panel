@@ -6,7 +6,11 @@
 
 契约:
   - 未声明 / 非法声明 → backtest_defaults 为 None (坏配置一律不透传)
-  - 合法声明         → 原样透传 entry_fill / exit_fill
+  - 合法声明         → 原样透传 entry_fill / exit_fill / max_positions / max_exposure_pct
+
+仓位声明 (max_positions / max_exposure_pct) 解决的是另一个失真: 平均持仓只有 ~0.5 个
+仓位的策略, 按 max_positions=10 分配时每笔只给 1/10 资金, 回测收益被 1/max_positions
+稀释, 反映的是「95% 现金空转」而非策略能力. 策略可声明自己的仓位口径, 前端自动套用.
 """
 from __future__ import annotations
 
@@ -97,3 +101,49 @@ def test_minute_exit_fill_is_a_valid_exit_declaration():
         "entry_fill": "close_t",
         "exit_fill": "signal_next_minute",
     }
+
+
+def test_position_sizing_is_passed_through():
+    """仓位声明与成交口径同属回测默认值, 需一并透传且互不覆盖。"""
+    s = _make_strategy({
+        "id": "test_strat",
+        "backtest_defaults": {
+            "entry_fill": "high_t",
+            "exit_fill": "close_t",
+            "max_positions": 3,
+            "max_exposure_pct": 1.0,
+        },
+    })
+    assert _strategy_detail(s, overrides=None)["backtest_defaults"] == {
+        "entry_fill": "high_t",
+        "exit_fill": "close_t",
+        "max_positions": 3,
+        "max_exposure_pct": 1.0,
+    }
+
+
+def test_position_sizing_only_declaration_has_no_fills():
+    """只声明仓位时不得凭空补出成交口径 —— 未声明的字段保持页面当前值。"""
+    s = _make_strategy({"id": "test_strat", "backtest_defaults": {"max_positions": 2}})
+    assert _strategy_detail(s, overrides=None)["backtest_defaults"] == {"max_positions": 2}
+
+
+@pytest.mark.parametrize(
+    "declared",
+    [
+        {"max_positions": 0},          # 小于 1
+        {"max_positions": 51},         # 超出上限
+        {"max_positions": 3.5},        # 非整数
+        {"max_positions": "3"},        # 字符串
+        {"max_positions": True},       # bool 是 int 子类, 必须排除
+        {"max_positions": None},       # 空值
+        {"max_exposure_pct": 0},       # 空仓
+        {"max_exposure_pct": 1.2},     # 超过 100%
+        {"max_exposure_pct": "1"},     # 字符串
+        {"max_exposure_pct": False},   # bool 必须排除
+    ],
+)
+def test_invalid_position_declarations_are_dropped(declared):
+    """坏仓位配置必须丢弃, 不能把 0 仓/超额仓位透传到前端。"""
+    s = _make_strategy({"id": "test_strat", "backtest_defaults": declared})
+    assert _strategy_detail(s, overrides=None)["backtest_defaults"] is None

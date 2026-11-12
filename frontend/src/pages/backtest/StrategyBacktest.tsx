@@ -4,6 +4,7 @@ import { motion, AnimatePresence } from 'framer-motion'
 import { Play, FlaskConical, Clock, Loader2, Square, Search, Plus, X, SlidersHorizontal, BarChart3, Gauge, Zap, ListPlus, HelpCircle, ChevronRight, AlertTriangle, Layers, BookmarkPlus, Download, Filter, Star, TrendingUp, CalendarRange } from 'lucide-react'
 import {
   api,
+  type BacktestHistoryDetail,
   type StrategyBacktestResult,
   type ResearchCandidate,
   type StrategyBacktestTrade,
@@ -345,8 +346,8 @@ const buildDefaultOverrides = (detail: StrategyDetail) => normalizeStrategyOverr
 const strategyBacktestConfigSignature = (detail: StrategyDetail) => JSON.stringify({
   execution_backend: detail.execution_backend,
   basic_filter: detail.basic_filter,
-  // 成交口径声明属于策略配置面: 声明变化时让已保存的表单状态失效,
-  // 否则老用户会把旧口径(如次日开盘)一直沿用下去, 策略自带的默认值形同虚设。
+  // 成交口径/仓位声明属于策略配置面: 声明变化时让已保存的表单状态失效,
+  // 否则老用户会把旧口径(如次日开盘、10 个仓位)一直沿用下去, 策略自带的默认值形同虚设。
   backtest_defaults: detail.backtest_defaults,
   params: detail.params,
   params_defaults: detail.params_defaults,
@@ -953,10 +954,13 @@ function StockPoolPicker({ value, onChange, assetType = 'stock' }: { value: stri
   )
 }
 
-export function StrategyBacktest({ loadCandidate, onLoadConsumed }: {
+export function StrategyBacktest({ loadCandidate, onLoadConsumed, loadHistory, onHistoryConsumed }: {
   /** 候选方案「载入复测」: 回填保存的回测配置 (消费后由父组件清空) */
   loadCandidate?: ResearchCandidate | null
   onLoadConsumed?: () => void
+  /** 回测历史「查看」: 回填配置 + 展示保存的完整结果 (消费后由父组件清空) */
+  loadHistory?: BacktestHistoryDetail | null
+  onHistoryConsumed?: () => void
 }) {
   const queryClient = useQueryClient()
   const signalNames = useSignalNames()
@@ -1007,10 +1011,8 @@ export function StrategyBacktest({ loadCandidate, onLoadConsumed }: {
   // (切页不卸载组件,内存中的 result 仍保留,无需靠 localStorage 恢复)。
   const [result, setResult] = useState<StrategyBacktestResult | null>(null)
 
-  // 候选方案「载入复测」: 把保存的 23 项回测配置回填到表单 (字段缺失时保留当前值)
-  useEffect(() => {
-    if (!loadCandidate) return
-    const cfg = (loadCandidate.config ?? {}) as Record<string, any>
+  /** 把保存的回测配置回填到表单 (字段缺失时保留当前值) */
+  const applySavedConfig = (cfg: Record<string, any>) => {
     if (cfg.strategy_id) setSelectedStrategy(String(cfg.strategy_id))
     if (cfg.asset_type === 'stock' || cfg.asset_type === 'etf') setAssetType(cfg.asset_type)
     if (cfg.symbols != null) {
@@ -1046,10 +1048,32 @@ export function StrategyBacktest({ loadCandidate, onLoadConsumed }: {
       setRegimeStates([])
       setRegimeMinScore('')
     }
+  }
+
+  // 候选方案「载入复测」: 把保存的 23 项回测配置回填到表单 (字段缺失时保留当前值)
+  useEffect(() => {
+    if (!loadCandidate) return
+    applySavedConfig((loadCandidate.config ?? {}) as Record<string, any>)
     toast(`已载入「${loadCandidate.name}」配置，可直接复测`, 'success')
     onLoadConsumed?.()
     // eslint-disable-next-line react-hooks/exhaustive-deps -- 仅在切换候选时执行一次性回填
   }, [loadCandidate])
+
+  // 回测历史「查看」: 回填配置并展示保存的完整结果, 重启程序后也能复看
+  useEffect(() => {
+    if (!loadHistory) return
+    applySavedConfig((loadHistory.config ?? {}) as Record<string, any>)
+    if (loadHistory.result) {
+      setResult(loadHistory.result)
+      setResultTab('daily')
+      setDailyPage(0)
+      setTradePage(0)
+    }
+    toast(`已载入「${loadHistory.strategy_name}」的回测记录`, 'success')
+    onHistoryConsumed?.()
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- 仅在选中历史记录时执行一次性回填
+  }, [loadHistory])
+
   const [resultTab, setResultTab] = useState<'daily' | 'trades' | 'picks' | 'attribution'>('daily')
   // 因子归因表的 id → 中文标签 (字段视图 + 因子库合并, 自定义因子也在库内)
   const factorMetaQ = useQuery({ queryKey: QK.factorColumns, queryFn: api.factorColumns, staleTime: 300_000 })
@@ -1127,11 +1151,13 @@ export function StrategyBacktest({ loadCandidate, onLoadConsumed }: {
   const resetConfigFromDetail = (detail: StrategyDetail) => {
     setStrategyParams(strategyDefaultParams(detail))
     setOverrides(buildDefaultOverrides(detail))
-    // 策略声明了自己的成交口径时(如打板策略必须按信号日当天成交), 一并恢复默认。
+    // 策略声明了自己的成交口径/仓位时(如打板策略必须按信号日当天成交), 一并恢复默认。
     // 只覆盖声明过的字段, 未声明的策略保持页面当前口径不变。
     const fills = detail.backtest_defaults
     if (fills?.entry_fill) setEntryFill(fills.entry_fill)
     if (fills?.exit_fill) setExitFill(fills.exit_fill)
+    if (fills?.max_positions != null) setMaxPositions(String(fills.max_positions))
+    if (fills?.max_exposure_pct != null) setMaxExposure(String(Math.round(fills.max_exposure_pct * 100)))
   }
 
   // 「应用到策略」: 把弹窗里当前编辑的 overrides + params 持久化为策略定义,

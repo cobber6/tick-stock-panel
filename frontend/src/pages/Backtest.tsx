@@ -1,11 +1,12 @@
 import { useEffect, useState } from 'react'
 import { Navigate, useLocation, useNavigate, useSearchParams } from 'react-router-dom'
-import { BookmarkCheck, FlaskConical, ShieldCheck } from 'lucide-react'
+import { BookmarkCheck, FlaskConical, History, ShieldCheck } from 'lucide-react'
 import { PageHeader } from '@/components/PageHeader'
+import { BacktestHistoryDialog } from './backtest/BacktestHistoryDialog'
 import { ResearchCandidatesDialog } from './backtest/ResearchCandidatesDialog'
 import { RobustnessValidation } from './backtest/RobustnessValidation'
 import { StrategyBacktest } from './backtest/StrategyBacktest'
-import { type ResearchCandidate } from '@/lib/api'
+import { type BacktestHistoryDetail, type ResearchCandidate } from '@/lib/api'
 
 type Tab = 'strategy' | 'robustness'
 
@@ -30,6 +31,9 @@ export function Backtest() {
   const [candidatesOpen, setCandidatesOpen] = useState(false)
   // 候选「载入复测」: 弹窗选定 → 关闭弹窗切到策略页 → StrategyBacktest 消费后清空
   const [pendingLoad, setPendingLoad] = useState<ResearchCandidate | null>(null)
+  const [historyOpen, setHistoryOpen] = useState(false)
+  // 历史记录「查看」: 载入完整结果并回填配置, 消费后清空
+  const [pendingHistory, setPendingHistory] = useState<BacktestHistoryDetail | null>(null)
 
   // 跨页「载入复测」: 因子页候选弹窗经 router state 传入 (location.state), 消费后清除防止刷新重复载入
   const stateCandidate = (location.state as { loadCandidate?: ResearchCandidate } | null)?.loadCandidate ?? null
@@ -74,6 +78,16 @@ export function Backtest() {
           <div className="flex w-full min-w-0 items-center gap-1.5 sm:gap-2 lg:w-auto">
             <button
               type="button"
+              onClick={() => setHistoryOpen(true)}
+              aria-label="打开回测历史"
+              title="回测历史"
+              className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-btn border border-border bg-surface px-2 text-[11px] font-medium text-secondary transition-colors hover:border-accent/40 hover:text-accent sm:px-2.5 sm:text-xs"
+            >
+              <History className="h-3.5 w-3.5" />
+              <span>回测历史</span>
+            </button>
+            <button
+              type="button"
               onClick={() => setCandidatesOpen(true)}
               aria-label="打开候选方案"
               title="候选方案"
@@ -116,6 +130,8 @@ export function Backtest() {
           <StrategyBacktest
             loadCandidate={pendingLoad}
             onLoadConsumed={() => setPendingLoad(null)}
+            loadHistory={pendingHistory}
+            onHistoryConsumed={() => setPendingHistory(null)}
           />
         )}
         {activeTab === 'robustness' && <RobustnessValidation />}
@@ -127,6 +143,17 @@ export function Backtest() {
           onLoadStrategy={candidate => {
             setPendingLoad(candidate)
             setCandidatesOpen(false)
+            if (activeTab !== 'strategy') changeTab('strategy')
+          }}
+        />
+      )}
+
+      {historyOpen && (
+        <BacktestHistoryDialog
+          onClose={() => setHistoryOpen(false)}
+          onLoad={detail => {
+            setPendingHistory(detail)
+            setHistoryOpen(false)
             if (activeTab !== 'strategy') changeTab('strategy')
           }}
         />

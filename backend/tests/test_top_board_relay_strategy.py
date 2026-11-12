@@ -353,10 +353,15 @@ def test_meta_declares_limit_price_fill():
     「信号日收盘」完全等价; 触板未封日 high == 涨停价而 close 已回落, 只有按最高价成交
     才等于打板单的真实成交价(按收盘成交会系统性高估收益)。
     清仓仍用「信号日收盘」: 尾盘未封板时按当日收盘离场。
+
+    仓位同属回测口径: 本策略平均只有 ~0.5 个仓位在持仓, 沿用页面默认的 10 仓会把单笔
+    资金压到 1/10, 收益被稀释。3 仓是 2018-2026 全样本中一笔信号都不丢的最小值。
     """
     assert top_board_relay.META["backtest_defaults"] == {
         "entry_fill": "high_t",
         "exit_fill": "close_t",
+        "max_positions": 3,
+        "max_exposure_pct": 1.0,
     }
 
 

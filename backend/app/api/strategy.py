@@ -163,14 +163,21 @@ def _child_meta(engine: StrategyEngine | None, child_id: str) -> dict:
 
 _BACKTEST_ENTRY_FILLS = frozenset({"close_t", "open_t+1", "high_t"})
 _BACKTEST_EXIT_FILLS = frozenset({"close_t", "open_t+1", "signal_next_minute"})
+# 仓位声明的接受范围: 持仓数超过 50 等价于「每笔零花钱」, 总仓位必须是 (0, 1] 的占比。
+_MAX_POSITIONS_RANGE = (1, 50)
+_MAX_EXPOSURE_RANGE = (0.0, 1.0)
 
 
 def _backtest_defaults(meta: dict) -> dict | None:
-    """策略自带的回测成交口径默认值, 由策略 META.backtest_defaults 声明.
+    """策略自带的回测默认值, 由策略 META.backtest_defaults 声明.
 
     部分策略的信号只有在信号日当天成交才成立 (如打板策略必须按封板日收盘价成交,
     推到次日开盘就退化成「无脑追高开」). 此类策略可在 META 里声明默认口径,
     前端选中该策略时自动套用, 用户仍可在回测页手动覆盖.
+
+    仓位 (max_positions / max_exposure_pct) 同理: 单笔收益会被 1/max_positions 稀释,
+    实际平均持仓只有半仓的策略需要声明更集中的仓位口径, 否则回测结果反映的是
+    「95% 现金空转」而不是策略能力.
 
     非法值一律丢弃而非透传: META 是策略源文件里的自由 dict, 坏配置不该流到前端.
     """
@@ -184,6 +191,21 @@ def _backtest_defaults(meta: dict) -> dict | None:
         result["entry_fill"] = entry_fill
     if exit_fill in _BACKTEST_EXIT_FILLS:
         result["exit_fill"] = exit_fill
+    max_positions = raw.get("max_positions")
+    # bool 是 int 的子类, 显式排除, 避免 true 被当成 1
+    if (
+        isinstance(max_positions, int)
+        and not isinstance(max_positions, bool)
+        and _MAX_POSITIONS_RANGE[0] <= max_positions <= _MAX_POSITIONS_RANGE[1]
+    ):
+        result["max_positions"] = max_positions
+    max_exposure = raw.get("max_exposure_pct")
+    if (
+        isinstance(max_exposure, (int, float))
+        and not isinstance(max_exposure, bool)
+        and _MAX_EXPOSURE_RANGE[0] < float(max_exposure) <= _MAX_EXPOSURE_RANGE[1]
+    ):
+        result["max_exposure_pct"] = float(max_exposure)
     return result or None
 
 
