@@ -74,6 +74,19 @@ def _entry_gap_blocked(
     return entry_price / prev_close - 1.0 >= abs(max_gap_pct)
 
 
+def _entry_gap_blocked_for_fill(
+    entry_price: float, prev_close: float, config: "MatcherConfig"
+) -> bool:
+    """gap 过滤只对次日开盘成交 (open_t+1) 有意义。
+
+    high_t 是信号日最高价 (打板价), close_t 是信号日收盘价, 两者与"前收"的
+    比值是当日涨幅而非隔夜 gap; 对它们套用 gap 阈值会把所有涨停单误杀。
+    """
+    if config.entry_fill != "open_t+1":
+        return False
+    return _entry_gap_blocked(entry_price, prev_close, config.entry_max_gap_pct)
+
+
 @dataclass
 class MatcherConfig:
     # matching 为向后兼容入口: 仅传 matching 时, entry_fill/exit_fill 都取 matching 的值。
@@ -94,7 +107,7 @@ class MatcherConfig:
     trailing_take_profit_drawdown_pct: float | None = None
     max_hold_days: int | None = None
     # 入场日最大开盘 gap: entry_price / 前一交易日收盘 - 1 >= 该值时拦截买入。
-    # None=不过滤。仅矩阵撮合路径 (portfolio / independent) 生效。
+    # None=不过滤。仅 entry_fill="open_t+1" 生效 (当日 high_t/close_t 不是隔夜 gap)。
     entry_max_gap_pct: float | None = None
     max_positions: int = 10
     max_exposure_pct: float = 1.0
@@ -990,10 +1003,8 @@ class BacktestEngine:
             prev_close = (
                 float(matrix.close[time_id - 1, asset_id]) if time_id > 0 else float("nan")
             )
-            if _entry_gap_blocked(
-                float(entry_prices[time_id, asset_id]),
-                prev_close,
-                config.entry_max_gap_pct,
+            if _entry_gap_blocked_for_fill(
+                float(entry_prices[time_id, asset_id]), prev_close, config
             ):
                 return False, "buy_gap_filter"
             return True, ""
@@ -1445,8 +1456,8 @@ class BacktestEngine:
                 if idx > 0 and bool(same_prev_symbol[idx - 1])
                 else float("nan")
             )
-            if _entry_gap_blocked(
-                float(entry_prices[idx]), prev_close, config.entry_max_gap_pct
+            if _entry_gap_blocked_for_fill(
+                float(entry_prices[idx]), prev_close, config
             ):
                 return False, "buy_gap_filter"
             return True, ""
@@ -1986,10 +1997,8 @@ class BacktestEngine:
             prev_close = (
                 float(matrix.close[time_id - 1, asset_id]) if time_id > 0 else float("nan")
             )
-            if _entry_gap_blocked(
-                float(entry_prices[time_id, asset_id]),
-                prev_close,
-                config.entry_max_gap_pct,
+            if _entry_gap_blocked_for_fill(
+                float(entry_prices[time_id, asset_id]), prev_close, config
             ):
                 return False, "buy_gap_filter"
             return True, ""
@@ -2558,8 +2567,8 @@ class BacktestEngine:
                 if idx > 0 and bool(same_prev_symbol[idx - 1])
                 else float("nan")
             )
-            if _entry_gap_blocked(
-                float(entry_prices[idx]), prev_close, config.entry_max_gap_pct
+            if _entry_gap_blocked_for_fill(
+                float(entry_prices[idx]), prev_close, config
             ):
                 return False, "buy_gap_filter"
             return True, ""
