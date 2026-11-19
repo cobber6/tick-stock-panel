@@ -223,3 +223,102 @@ def test_lightweight_portfolio_keeps_stats_without_curves_or_monte_carlo(monkeyp
     assert "mc_maxdd_p50" not in light.stats
     for name in ("total_return", "annual_return", "max_drawdown", "sharpe", "sortino"):
         assert light.stats[name] == full.stats[name]
+
+
+@pytest.mark.parametrize("runner", ["portfolio", "independent"])
+def test_entry_max_gap_blocks_high_open(runner):
+    """入场日开盘 gap 超过阈值时拦截; 两条矩阵撮合路径口径一致。"""
+    panel = pl.DataFrame([
+        _row("A", 0, 10.0, signal_entry=True),
+        _row("A", 1, 11.0),  # 相对前收 10.0 高开 10%
+        _row("A", 2, 11.0),
+    ]).sort(["symbol", "date"])
+    matrix = build_market_matrix(
+        panel, panel["signal_entry"], None, entry_delay_bars=1
+    )
+    config = MatcherConfig(
+        matching="open_t+1",
+        entry_fill="open_t+1",
+        exit_fill="close_t",
+        fees_pct=0,
+        slippage_bps=0,
+        max_positions=1,
+        max_hold_days=1,
+        entry_max_gap_pct=0.03,
+    )
+    engine = BacktestEngine(repo=None)  # type: ignore[arg-type]
+    if runner == "portfolio":
+        result = engine.simulate_market_matrix(matrix, config)
+    else:
+        result = engine.simulate_independent_market_matrix(
+            matrix, raw_candidates=int(matrix.entry.sum()), config=config
+        )
+
+    assert result.stats["execution"]["buy_gap_filter"] == 1
+    assert result.trades == []
+
+
+@pytest.mark.parametrize("runner", ["portfolio", "independent"])
+def test_entry_max_gap_allows_small_open(runner):
+    panel = pl.DataFrame([
+        _row("A", 0, 10.0, signal_entry=True),
+        _row("A", 1, 10.1),  # 相对前收 10.0 高开 1%
+        _row("A", 2, 10.5),
+    ]).sort(["symbol", "date"])
+    matrix = build_market_matrix(
+        panel, panel["signal_entry"], None, entry_delay_bars=1
+    )
+    config = MatcherConfig(
+        matching="open_t+1",
+        entry_fill="open_t+1",
+        exit_fill="close_t",
+        fees_pct=0,
+        slippage_bps=0,
+        max_positions=1,
+        max_hold_days=1,
+        entry_max_gap_pct=0.03,
+    )
+    engine = BacktestEngine(repo=None)  # type: ignore[arg-type]
+    if runner == "portfolio":
+        result = engine.simulate_market_matrix(matrix, config)
+    else:
+        result = engine.simulate_independent_market_matrix(
+            matrix, raw_candidates=int(matrix.entry.sum()), config=config
+        )
+
+    assert result.stats["execution"]["buy_gap_filter"] == 0
+    assert len(result.trades) == 1
+
+
+@pytest.mark.parametrize("runner", ["portfolio", "independent"])
+def test_entry_max_gap_not_applied_to_same_day_fills(runner):
+    """high_t/close_t 是当日成交, 不能套用隔夜 gap 阈值 (否则涨停单全被误杀)。"""
+    panel = pl.DataFrame([
+        _row("A", 0, 10.0),
+        _row("A", 1, 12.0, open=10.0, high=12.0, low=10.0,
+             signal_entry=True, signal_limit_up=True),
+        _row("A", 2, 12.0),
+    ]).sort(["symbol", "date"])
+    matrix = build_market_matrix(
+        panel, panel["signal_entry"], None, entry_delay_bars=0
+    )
+    config = MatcherConfig(
+        matching="open_t+1",
+        entry_fill="high_t",
+        exit_fill="close_t",
+        fees_pct=0,
+        slippage_bps=0,
+        max_positions=1,
+        max_hold_days=1,
+        entry_max_gap_pct=0.03,
+    )
+    engine = BacktestEngine(repo=None)  # type: ignore[arg-type]
+    if runner == "portfolio":
+        result = engine.simulate_market_matrix(matrix, config)
+    else:
+        result = engine.simulate_independent_market_matrix(
+            matrix, raw_candidates=int(matrix.entry.sum()), config=config
+        )
+
+    assert result.stats["execution"]["buy_gap_filter"] == 0
+    assert len(result.trades) == 1

@@ -60,6 +60,7 @@ class _EngineStub:
         self.sim_panel: pl.DataFrame | None = None
         self.sim_matrix = None
         self.sim_entries: pl.Series | None = None
+        self.sim_config = None
 
     def load_panel(self, symbols, start: date, end: date, columns=None, asset_type: str = "stock") -> pl.DataFrame:
         self.load_count += 1
@@ -113,6 +114,7 @@ class _EngineStub:
         options=None,
     ) -> SimResult:
         self.sim_matrix = matrix
+        self.sim_config = config
         return SimResult(
             equity_curve=[{"date": "2024-01-01", "value": config.initial_capital}],
             drawdown_curve=[{"date": "2024-01-01", "value": 0.0}],
@@ -698,3 +700,118 @@ def test_full_mode_reports_factor_attribution():
     assert attribution["n_win"] == 1 and attribution["n_lose"] == 0
     assert attribution["factors"][0]["factor"] == "factor"
     assert attribution["factors"][0]["win_mean"] == 5.0
+
+
+def test_exit_filter_is_ored_into_exit_mask():
+    """python_history_legacy 的 exit_filter 与 EXIT_SIGNALS 同层参与离场掩码。
+
+    第1天候选 → 第2天开盘建仓；阴线条件在第2、3天都成立, 但建仓当日引擎
+    不会卖出, 实际离场只能从第3天开始。
+    """
+    start = date(2024, 1, 1)
+    prices = [(10.0, 10.5), (10.5, 10.2), (10.2, 9.8), (9.8, 10.0)]
+    rows = []
+    for offset, (open_price, close_price) in enumerate(prices):
+        rows.append({
+            "symbol": "A",
+            "name": "A",
+            "date": start + timedelta(days=offset),
+            "open": open_price,
+            "high": max(open_price, close_price) + 0.1,
+            "low": min(open_price, close_price) - 0.1,
+            "close": close_price,
+            "volume": 100_000,
+            "amount": 1000.0,
+            "signal_limit_up": False,
+            "signal_limit_down": False,
+        })
+    panel = pl.DataFrame(rows).sort(["symbol", "date"])
+
+    def _first_day(df: pl.DataFrame, params: dict) -> pl.DataFrame:
+        return df.filter(pl.col("date") == pl.col("date").min())
+
+    strategy = _strategy(
+        filter_fn=None,
+        filter_history_fn=_first_day,
+        exit_filter_fn=lambda df, params: pl.col("close") < pl.col("open"),
+        required_features=frozenset({"close"}),
+    )
+    engine = _EngineStub(panel)
+    service = StrategyBacktestService(
+        engine=engine, strategy_engine=_StrategyEngineStub(strategy)
+    )
+
+    result = service.run(StrategyBacktestConfig(
+        strategy_id="test",
+        symbols=None,
+        start=start,
+        end=start + timedelta(days=3),
+        matching="open_t+1",
+        exit_fill="close_t",
+        mode="position",
+    ))
+
+    assert result.error is None
+    assert engine.sim_matrix is not None
+    assert engine.sim_matrix.entry[:, 0].tolist() == [0, 1, 0, 0]
+    assert engine.sim_matrix.exit[:, 0].tolist() == [0, 1, 1, 0]
+
+
+def test_entry_max_gap_can_be_overridden_by_strategy_param():
+    """回测页参数 entry_max_gap_pct 覆盖模块常量; 填 0 表示关闭。"""
+    start = date(2024, 1, 1)
+    panel = pl.DataFrame([
+        {
+            "symbol": "A",
+            "name": "A",
+            "date": start + timedelta(days=offset),
+            "open": 10.0,
+            "high": 10.0,
+            "low": 10.0,
+            "close": 10.0,
+            "volume": 1000.0,
+            "amount": 1000.0,
+            "signal_limit_up": False,
+            "signal_limit_down": False,
+        }
+        for offset in range(3)
+    ]).sort(["symbol", "date"])
+    strategy = _strategy()
+    strategy.meta["params"] = [{
+        "id": "entry_max_gap_pct",
+        "label": "次日开盘最大 gap",
+        "type": "float",
+        "default": 0.03,
+        "min": 0.0,
+        "max": 0.2,
+        "step": 0.005,
+    }]
+    engine = _EngineStub(panel)
+    service = StrategyBacktestService(
+        engine=engine, strategy_engine=_StrategyEngineStub(strategy)
+    )
+
+    result = service.run(StrategyBacktestConfig(
+        strategy_id="test",
+        symbols=None,
+        start=start,
+        end=start + timedelta(days=2),
+        matching="open_t+1",
+        mode="position",
+        params={"entry_max_gap_pct": 0.02},
+    ))
+    assert result.error is None
+    assert engine.sim_config is not None
+    assert engine.sim_config.entry_max_gap_pct == pytest.approx(0.02)
+
+    result = service.run(StrategyBacktestConfig(
+        strategy_id="test",
+        symbols=None,
+        start=start,
+        end=start + timedelta(days=2),
+        matching="open_t+1",
+        mode="position",
+        params={"entry_max_gap_pct": 0},
+    ))
+    assert result.error is None
+    assert engine.sim_config.entry_max_gap_pct is None

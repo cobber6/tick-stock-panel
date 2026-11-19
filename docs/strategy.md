@@ -76,6 +76,8 @@
 | `META` | 策略元信息(名称、参数、方向等),用户可在 UI 调整阈值 |
 | `basic_filter(df, params)` | 模式 A:单日过滤,返回 `pl.Expr` |
 | `filter_history(df, params)` | 模式 B:历史窗口过滤,返回 `pl.DataFrame`(配 `LOOKBACK_DAYS`) |
+| `exit_filter(df, params)` | 可选:自定义卖点表达式,返回布尔 `pl.Expr`(仅 `python_history_legacy`) |
+| `ENTRY_MAX_GAP_PCT` | 可选:入场日开盘 gap 上限(小数),超过则拦截买入;`None` 不过滤 |
 | `scoring` | 策略权重,总和 = 1.0 |
 | `ENTRY_SIGNALS` / `EXIT_SIGNALS` | 进出场信号列(回测用) |
 

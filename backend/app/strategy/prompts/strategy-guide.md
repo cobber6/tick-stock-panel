@@ -152,6 +152,37 @@ anchor_date = _date.fromisoformat(anchor_raw) if isinstance(anchor_raw, str) els
 # 之后才能: pl.col("date") == anchor_date  或  pl.col("date") > anchor_date
 ```
 
+### 自定义卖点（exit_filter，可选）
+
+`EXIT_SIGNALS` 只能引用已存在的信号列。若卖点无法用现有信号表达（如“收盘阴线”“跌破某均线且放量”），`python_history_legacy` 策略可额外声明 `exit_filter(df, params) -> pl.Expr`：
+
+```python
+EXIT_SIGNALS = []
+
+def exit_filter(df: pl.DataFrame, params: dict) -> pl.Expr:
+    # 收盘阴线: 该日收盘价离场（成交口径由回测页/backtest_defaults 的 exit_fill 决定）
+    return pl.col("close") < pl.col("open")
+```
+
+- 只支持 `EXECUTION_BACKEND = "python_history_legacy"`；其他后端声明会报错。
+- 与 `EXIT_SIGNALS` 同层（OR）参与离场掩码；表达式为 True 的持仓日会触发卖出。
+- 建仓当日引擎不执行卖出；`STOP_LOSS` 的盘中止损线从买入次日起生效。
+- 表达式引用的字段会被自动并入回测特征计划；基础 OHLCV 无需声明。
+
+### 入场开盘 gap 过滤（ENTRY_MAX_GAP_PCT，可选）
+
+信号在 D 日产生、D+1 开盘成交时，可在策略模块顶层声明入场日最大高开幅度：
+
+```python
+ENTRY_MAX_GAP_PCT = 0.03  # 次日开盘 / 前收 - 1 >= 3% 则拦截买入
+```
+
+- 由回测矩阵撮合在入场日按 `entry_price / 前一交易日收盘 - 1` 判断；前收缺失时 fail-closed（拦截）。
+- **只对次日开盘成交（`entry_fill="open_t+1"`）生效**；`high_t` / `close_t` 是当日成交，不套用隔夜 gap 阈值。
+- 仅影响建仓，不影响已有持仓的卖出；`None` 表示不过滤。
+- 可在 `META.params` 中声明 `id="entry_max_gap_pct"` 的 float 参数暴露到回测页；回测服务优先取参数值，填 `0` 表示关闭。
+- 可在回测请求的 `overrides.entry_max_gap_pct` 中覆盖（含 `null` 关闭）。
+
 ## 3. 常用指标列（参考，可直接使用）
 
 以下列可直接引用。使用 `filter_history()` 或其他无法静态解析的 Python 逻辑时，必须声明最终依赖的公开字段，基础 OHLCV 和指标中间列不需要声明：
@@ -274,19 +305,19 @@ REQUIRED_FEATURES = {"ma20", "momentum_20d", "vol_ratio_5d"}
 | 数据 | 说明 |
 |------|------|
 | 财务数据 (PE/PB/ROE/净利润/营收/资产负债等) | 存储在独立 financials 表，未 JOIN |
-| 扩展数据 (概念/行业/人气排名/资金流向等) | 存储在 ext_data 目录，未 JOIN |
+| 扩展数据 (人气排名/资金流向等其他 ext_data 字段) | 存储在 ext_data 目录，未 JOIN |
 | 盘中实时数据 (分时价/五档盘口等) | 仅前端轮询使用 |
 
-如需财务或扩展数据作为筛选条件，需先在系统层面完成 JOIN 再提供给策略（当前未实现）。
+概念/行业成分是唯一例外：可通过 `from app.strategy.market_data import get_dimension_members` 读取当前快照映射（返回 `symbol` / `member` 两列），在 `filter_history()` 内自行 JOIN 面板。市场环境时序可通过 `get_market_regime()` 读取（返回 `date` / `state` / `score` 等列），`state` 取值为 `strong / lean_strong / range / lean_weak / weak`（当日行由盘后管道生成，缺失时应 fail-closed）。两者都是快照/派生数据，回看历史存在口径漂移。其他扩展数据需先在系统层面完成 JOIN 再提供给策略。
 
 ## 6. 规则
 
-1. `filter()` 必须返回 `pl.Expr` (用 `&` `|` 组合布尔表达式)；`filter_history()` 返回筛选后的 `DataFrame`
+1. `filter()` 必须返回 `pl.Expr` (用 `&` `|` 组合布尔表达式)；`filter_history()` 返回筛选后的 `DataFrame`；`exit_filter()` 返回布尔 `pl.Expr`
 2. 信号列使用 `.fill_null(False)` 处理空值
 3. 用户可能调节的数值阈值通过 `params` 暴露；公式常数、固定窗口边界、一次性内部变量不必强行参数化
 4. `scoring` 只能使用上述真实数值字段或受控虚拟字段 `ma20_bias`，权重总和必须为 1.0；不要使用条件名称或信号列作为评分字段
 5. 遵循 A 股 T+1 规则 (当日买入次日才能卖出)
-6. Polars 策略允许 `import polars as pl` 和 `from datetime import date/datetime`；矩阵策略只允许 NumPy 和 `app.backtest.matrix` 协议/算子
+6. Polars 策略允许 `import polars as pl`、`from datetime import date/datetime`、`from app.strategy.market_data import get_index_daily, get_etf_daily, get_daily, get_dimension_members, get_market_regime`；矩阵策略只允许 NumPy 和 `app.backtest.matrix` 协议/算子
 7. 禁止使用 `open()`, `exec()`, `eval()`, `os`, `sys`, `subprocess`
 8. **贴合用户需求优先**：第3/4节的指标列和信号列仅供参考，能用则用；如果用户需求需要自定义计算（如"前高""上次涨停价""N日内某个事件后X天"），直接在 `filter_history()` 中自行设计和计算，不需要局限于已有列
 9. `filter_history()` 中优先用 Polars 向量化语法；仅在复杂状态机无法清晰表达时，才用 `partition_by("symbol")` 逐股票分析；`to_dicts()` 逐行分析的命中行必须以 `pl.DataFrame(hits, schema=df.schema)` 重建，禁止裸 `pl.DataFrame(hits)`（dict 推断类型漂移，见第 2 节关键要点）
