@@ -209,6 +209,9 @@ class StrategyDependencyResolver:
         required_features.update(_basic_filter_dependencies(basic_filter))
         filter_features, filter_resolved = _filter_dependencies(strategy, params)
         required_features.update(filter_features)
+        exit_features, exit_resolved = _exit_filter_dependencies(strategy, params)
+        required_features.update(exit_features)
+        filter_resolved = filter_resolved and exit_resolved
         embedded_signals = {
             feature
             for feature in required_features
@@ -514,6 +517,20 @@ def _filter_dependencies(strategy: StrategyDef, params: dict) -> tuple[set[str],
     except Exception as exc:
         logger.warning("strategy filter dependency resolution failed: %s", exc)
         return set(strategy.required_features), bool(strategy.required_features)
+
+
+def _exit_filter_dependencies(strategy: StrategyDef, params: dict) -> tuple[set[str], bool]:
+    """exit_filter 表达式引用的字段; 无法静态解析时返回 resolved=False。"""
+    if strategy.exit_filter_fn is None:
+        return set(), True
+    try:
+        expr = strategy.exit_filter_fn(pl.DataFrame(), params)
+        if expr is None:
+            return set(), True
+        return set(expr.meta.root_names()), True
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("strategy exit_filter dependency resolution failed: %s", exc)
+        return set(), False
 
 
 def _basic_filter_dependencies(config: dict) -> set[str]:
@@ -1194,6 +1211,13 @@ class StrategyBacktestService:
                 f"激活涨幅({trailing_take_profit_activate:.0%}), 请调整后再试"
             )
         max_hold_days = self._override_value(overrides, "max_hold_days", s.max_hold_days)
+        entry_max_gap_pct = self._normalize_pct(
+            self._override_value(
+                overrides, "entry_max_gap_pct", getattr(s, "entry_max_gap_pct", None)
+            ),
+            0.001,
+            1.0,
+        )
         score_min, score_max = self._normalize_score_range(
             overrides.get("score_min"),
             overrides.get("score_max"),
@@ -1210,6 +1234,7 @@ class StrategyBacktestService:
                 trailing_take_profit_activate=trailing_take_profit_activate,
                 trailing_take_profit_drawdown=trailing_take_profit_drawdown,
                 max_hold_days=max_hold_days,
+                entry_max_gap_pct=entry_max_gap_pct,
                 score_min=score_min,
                 score_max=score_max,
                 progress_cb=progress_cb,
@@ -1385,6 +1410,7 @@ class StrategyBacktestService:
             trailing_take_profit_activate_pct=trailing_take_profit_activate,
             trailing_take_profit_drawdown_pct=trailing_take_profit_drawdown,
             max_hold_days=max_hold_days,
+            entry_max_gap_pct=entry_max_gap_pct,
             max_positions=config.max_positions,
             max_exposure_pct=config.max_exposure_pct,
             score_min=score_min,
@@ -1675,6 +1701,16 @@ class StrategyBacktestService:
                     formal_candidate_mask = formal_candidate_mask & regime_row_mask
                     entry_mask = entry_mask & regime_row_mask
             raw_exit_mask = self._build_signal_mask(panel, exit_signals, "_exit")
+            if s.exit_filter_fn is not None:
+                try:
+                    exit_expr = s.exit_filter_fn(panel, params)
+                except Exception as e:  # noqa: BLE001
+                    return _err(f"策略卖出条件计算失败: {e}")
+                if exit_expr is not None:
+                    exit_filter_mask = panel.select(
+                        exit_expr.fill_null(False).alias("_exit_filter")
+                    )["_exit_filter"].cast(pl.Boolean)
+                    raw_exit_mask = raw_exit_mask | exit_filter_mask
             exit_range = self._date_range_mask(panel, config.start, load_end) if config.mode == "full" else formal_range
             exit_mask = raw_exit_mask & exit_range
             timing_ms["signals_score"] = round((time.perf_counter() - t_signal) * 1000, 1)
@@ -1784,6 +1820,7 @@ class StrategyBacktestService:
             "trailing_take_profit_activate": trailing_take_profit_activate,
             "trailing_take_profit_drawdown": trailing_take_profit_drawdown,
             "max_hold_days": max_hold_days,
+            "entry_max_gap_pct": entry_max_gap_pct,
             "full_horizon_days": full_horizon_days,
             "score_min": score_min,
             "score_max": score_max,
@@ -1855,6 +1892,7 @@ class StrategyBacktestService:
         trailing_take_profit_activate,
         trailing_take_profit_drawdown,
         max_hold_days,
+        entry_max_gap_pct,
         score_min,
         score_max,
         progress_cb,
@@ -1998,6 +2036,7 @@ class StrategyBacktestService:
             trailing_take_profit_activate_pct=trailing_take_profit_activate,
             trailing_take_profit_drawdown_pct=trailing_take_profit_drawdown,
             max_hold_days=max_hold_days,
+            entry_max_gap_pct=entry_max_gap_pct,
             max_positions=config.max_positions,
             max_exposure_pct=config.max_exposure_pct,
             score_min=score_min,
@@ -2092,6 +2131,7 @@ class StrategyBacktestService:
             "trailing_take_profit_activate": trailing_take_profit_activate,
             "trailing_take_profit_drawdown": trailing_take_profit_drawdown,
             "max_hold_days": max_hold_days,
+            "entry_max_gap_pct": entry_max_gap_pct,
             "full_horizon_days": full_horizon_days,
             "score_min": score_min,
             "score_max": score_max,

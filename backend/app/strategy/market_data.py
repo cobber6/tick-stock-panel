@@ -1,7 +1,11 @@
-"""策略可访问的指数/ETF 日K读取模块 — 白名单放行的只读数据入口。
+"""策略可访问的只读数据入口(指数/ETF 日K、概念/行业成分) — 白名单放行。
 
-供 Custom/AI 策略在 filter_history 内读取任意指数(及 ETF)的完整日K。
-策略通过白名单 import 本模块, 调用纯读函数; 禁止写操作或任意文件访问。
+供 Custom/AI 策略在 filter_history 内读取任意指数(及 ETF)的完整日K, 以及
+当前概念/行业成分映射。策略通过白名单 import 本模块, 调用纯读函数;
+禁止写操作或任意文件访问。
+
+口径提示: 概念/行业成分来自 ext_data 快照, 只有当前版本, 没有历史版本。
+按快照回看历史存在归属漂移(见 market_mainline.MEMBERSHIP_NOTE), 越近越准。
 
 设计要点:
   - 模块自身是框架侧信任代码, 对策略的沙箱逃逸拦截(ai_generator._validate_safety)照旧生效。
@@ -116,6 +120,61 @@ def get_daily(symbol, start=None, end=None, columns=None):
     except Exception as exc:
         logger.warning("market_data get_daily failed %s: %s", symbol, exc)
         return pl.DataFrame()
+
+
+def get_dimension_members(kind: str = "concept") -> pl.DataFrame:
+    """读取概念/行业成分映射(当前快照), 返回 symbol/member 两列。
+
+    kind: "concept"(概念) 或 "industry"(行业)。成分来自 ext_data 快照,
+    无历史版本; 按快照回看历史存在归属漂移, 越近越准。无数据返回空表,
+    不抛异常(与 get_daily 同语义), 调用方需自行判空。
+    """
+    if kind not in ("concept", "industry"):
+        raise ValueError(f"unsupported dimension kind: {kind!r}")
+    try:
+        from app.services.rps_rotation import _load_concept_map_df
+
+        map_df, _ = _load_concept_map_df(_get_repo(), kind)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("market_data get_dimension_members failed %s: %s", kind, exc)
+        return pl.DataFrame(schema={"symbol": pl.Utf8, "member": pl.Utf8})
+    if map_df.is_empty() or "_sym_up" not in map_df.columns or kind not in map_df.columns:
+        return pl.DataFrame(schema={"symbol": pl.Utf8, "member": pl.Utf8})
+    return (
+        map_df.select(
+            pl.col("_sym_up").cast(pl.Utf8).alias("symbol"),
+            pl.col(kind).cast(pl.Utf8).alias("member"),
+        )
+        .drop_nulls()
+        .unique()
+    )
+
+
+def get_market_regime(start=None, end=None, columns=None) -> pl.DataFrame:
+    """读取市场环境日频时序 (date/state/score...), 缺文件/空数据返回空表。
+
+    state ∈ {strong, lean_strong, range, lean_weak, weak}。数据由盘后管道
+    生成, 当日行在管道完成后才可见; 缺失时调用方应 fail-closed。
+    """
+    s = _norm_date(start, _FULL_START)
+    e = _norm_date(end, cn_today())
+    try:
+        data_dir = _get_repo().store.data_dir
+        path = data_dir / "regime_history" / "part.parquet"
+        if not path.exists():
+            return pl.DataFrame()
+        df = pl.read_parquet(path)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("market_data get_market_regime failed: %s", exc)
+        return pl.DataFrame()
+    if df.is_empty() or "date" not in df.columns:
+        return df
+    df = df.filter((pl.col("date") >= s) & (pl.col("date") <= e))
+    if columns:
+        keep = [c for c in columns if c in df.columns]
+        if keep:
+            df = df.select(keep)
+    return df
 
 
 def list_index_symbols() -> list[dict]:

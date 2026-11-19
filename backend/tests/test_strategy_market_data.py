@@ -1,5 +1,6 @@
 """策略指数K线访问模块 — 测试。"""
 import datetime
+from types import SimpleNamespace
 
 import polars as pl
 import pytest
@@ -99,6 +100,77 @@ def test_missing_symbol_returns_empty_no_raise(fake_repo):
 
 def test_list_index_symbols(fake_repo):
     assert market_data.list_index_symbols() == [{"symbol": "000001.SH", "name": "上证指数"}]
+
+
+def test_get_dimension_members_normalizes_columns(fake_repo, monkeypatch):
+    """概念/行业成分返回 symbol/member 两列, 大写 symbol 并去重。"""
+    from app.services import rps_rotation
+
+    source = pl.DataFrame({
+        "_sym_up": ["300001.SZ", "300001.SZ", "600000.SH"],
+        "concept": ["AI", "AI", "芯片"],
+    })
+    monkeypatch.setattr(
+        rps_rotation, "_load_concept_map_df", lambda repo, kind: (source, 2)
+    )
+
+    out = market_data.get_dimension_members("concept")
+
+    assert out.columns == ["symbol", "member"]
+    assert out.sort(["symbol", "member"]).to_dicts() == [
+        {"symbol": "300001.SZ", "member": "AI"},
+        {"symbol": "600000.SH", "member": "芯片"},
+    ]
+
+
+def test_get_dimension_members_rejects_unknown_kind(fake_repo):
+    with pytest.raises(ValueError, match="unsupported dimension kind"):
+        market_data.get_dimension_members("sector")
+
+
+def test_get_dimension_members_empty_when_ext_missing(fake_repo, monkeypatch):
+    from app.services import rps_rotation
+
+    monkeypatch.setattr(
+        rps_rotation,
+        "_load_concept_map_df",
+        lambda repo, kind: (pl.DataFrame(schema={"_sym_up": pl.Utf8, "concept": pl.Utf8}), 0),
+    )
+
+    out = market_data.get_dimension_members("concept")
+
+    assert out.is_empty()
+    assert out.columns == ["symbol", "member"]
+
+
+def test_get_market_regime_reads_date_state(tmp_path):
+    regime_dir = tmp_path / "regime_history"
+    regime_dir.mkdir()
+    pl.DataFrame({
+        "date": [datetime.date(2024, 1, 2), datetime.date(2024, 1, 3)],
+        "state": ["range", "weak"],
+        "score": [55, 20],
+    }).write_parquet(regime_dir / "part.parquet")
+    market_data._set_repo(SimpleNamespace(store=SimpleNamespace(data_dir=tmp_path)))
+    try:
+        out = market_data.get_market_regime(columns=["date", "state"])
+    finally:
+        market_data._reset_repo()
+
+    assert out.to_dicts() == [
+        {"date": datetime.date(2024, 1, 2), "state": "range"},
+        {"date": datetime.date(2024, 1, 3), "state": "weak"},
+    ]
+
+
+def test_get_market_regime_missing_file_returns_empty(tmp_path):
+    market_data._set_repo(SimpleNamespace(store=SimpleNamespace(data_dir=tmp_path)))
+    try:
+        out = market_data.get_market_regime()
+    finally:
+        market_data._reset_repo()
+
+    assert out.is_empty()
 
 
 BJ = datetime.date(2026, 3, 2)  # 钉死的北京日期, 不会碰巧等于跑测试那天的 date.today()

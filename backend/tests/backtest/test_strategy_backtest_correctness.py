@@ -698,3 +698,58 @@ def test_full_mode_reports_factor_attribution():
     assert attribution["n_win"] == 1 and attribution["n_lose"] == 0
     assert attribution["factors"][0]["factor"] == "factor"
     assert attribution["factors"][0]["win_mean"] == 5.0
+
+
+def test_exit_filter_is_ored_into_exit_mask():
+    """python_history_legacy 的 exit_filter 与 EXIT_SIGNALS 同层参与离场掩码。
+
+    第1天候选 → 第2天开盘建仓；阴线条件在第2、3天都成立, 但建仓当日引擎
+    不会卖出, 实际离场只能从第3天开始。
+    """
+    start = date(2024, 1, 1)
+    prices = [(10.0, 10.5), (10.5, 10.2), (10.2, 9.8), (9.8, 10.0)]
+    rows = []
+    for offset, (open_price, close_price) in enumerate(prices):
+        rows.append({
+            "symbol": "A",
+            "name": "A",
+            "date": start + timedelta(days=offset),
+            "open": open_price,
+            "high": max(open_price, close_price) + 0.1,
+            "low": min(open_price, close_price) - 0.1,
+            "close": close_price,
+            "volume": 100_000,
+            "amount": 1000.0,
+            "signal_limit_up": False,
+            "signal_limit_down": False,
+        })
+    panel = pl.DataFrame(rows).sort(["symbol", "date"])
+
+    def _first_day(df: pl.DataFrame, params: dict) -> pl.DataFrame:
+        return df.filter(pl.col("date") == pl.col("date").min())
+
+    strategy = _strategy(
+        filter_fn=None,
+        filter_history_fn=_first_day,
+        exit_filter_fn=lambda df, params: pl.col("close") < pl.col("open"),
+        required_features=frozenset({"close"}),
+    )
+    engine = _EngineStub(panel)
+    service = StrategyBacktestService(
+        engine=engine, strategy_engine=_StrategyEngineStub(strategy)
+    )
+
+    result = service.run(StrategyBacktestConfig(
+        strategy_id="test",
+        symbols=None,
+        start=start,
+        end=start + timedelta(days=3),
+        matching="open_t+1",
+        exit_fill="close_t",
+        mode="position",
+    ))
+
+    assert result.error is None
+    assert engine.sim_matrix is not None
+    assert engine.sim_matrix.entry[:, 0].tolist() == [0, 1, 0, 0]
+    assert engine.sim_matrix.exit[:, 0].tolist() == [0, 1, 1, 0]

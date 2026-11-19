@@ -209,6 +209,13 @@ class StrategyDef:
     # 仅 minute_filter: META["daily_history_bars"] 声明需要的日线历史窗口 (0=不需要;
     # >0 时 filter_minute_history 必须接受 daily 关键字, 引擎注入 context.daily_history)
     minute_daily_bars: int = 0
+    # 仅 python_history_legacy: 可选的自定义卖点表达式 exit_filter(df, params)。
+    # 返回布尔 Expr; 与 EXIT_SIGNALS 同层(OR)参与离场掩码, 供无法用信号列
+    # 表达的卖点(如"收盘阴线")使用。
+    exit_filter_fn: Callable[[pl.DataFrame, dict], pl.Expr] | None = None
+    # 入场日开盘 gap 上限 (ENTRY_MAX_GAP_PCT): 次日开盘 / 前收 - 1 >= 该值时
+    # 拦截买入; None=不过滤。仅回测矩阵撮合路径生效。
+    entry_max_gap_pct: float | None = None
 
 
 @dataclass
@@ -481,6 +488,7 @@ class StrategyEngine:
         filter_fn = getattr(mod, "filter", None)
         filter_history_fn = getattr(mod, "filter_history", None)
         filter_minute_history_fn = getattr(mod, "filter_minute_history", None)
+        exit_filter_fn = getattr(mod, "exit_filter", None)
         execution_backend = str(
             getattr(
                 mod,
@@ -562,6 +570,25 @@ class StrategyEngine:
         elif filter_history_fn is None or filter_fn is not None:
             raise ValueError("python_history_legacy strategy must declare only filter_history")
 
+        if exit_filter_fn is not None:
+            if execution_backend != "python_history_legacy":
+                raise ValueError(
+                    "exit_filter is only supported for python_history_legacy strategies"
+                )
+            if not callable(exit_filter_fn):
+                raise ValueError("exit_filter must be callable")
+
+        entry_max_gap_pct = getattr(mod, "ENTRY_MAX_GAP_PCT", None)
+        if entry_max_gap_pct is not None:
+            if isinstance(entry_max_gap_pct, bool):
+                raise ValueError("ENTRY_MAX_GAP_PCT must be a number or None")
+            try:
+                entry_max_gap_pct = float(entry_max_gap_pct)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("ENTRY_MAX_GAP_PCT must be a number or None") from exc
+            if not (0.0 < entry_max_gap_pct <= 1.0):
+                raise ValueError("ENTRY_MAX_GAP_PCT must be within (0, 1] or None")
+
         return StrategyDef(
             meta=meta,
             basic_filter=bf,
@@ -574,6 +601,8 @@ class StrategyEngine:
             max_hold_days=getattr(mod, "MAX_HOLD_DAYS", None),
             filter_fn=filter_fn,
             filter_history_fn=filter_history_fn,
+            exit_filter_fn=exit_filter_fn,
+            entry_max_gap_pct=entry_max_gap_pct,
             required_features=frozenset(meta.get("required_features", []) or [])
             | frozenset(getattr(mod, "REQUIRED_FEATURES", []) or []),
             lookback_days=int(getattr(mod, "LOOKBACK_DAYS", meta.get("lookback_days", 1)) or 1),
@@ -952,6 +981,10 @@ class StrategyEngine:
         if pool and not signal_df.is_empty():
             signal_df = signal_df.filter(pl.col("symbol").is_in(pool))
         exit_signal_hits = self._collect_signal_hits(signal_df, exit_signals)
+        if s.exit_filter_fn is not None and not signal_df.is_empty():
+            exit_signal_hits.extend(
+                self._collect_exit_filter_hits(signal_df, s.exit_filter_fn, params)
+            )
 
         # 普通策略只读目标日期；历史策略读取调用方注入的历史窗口。
         if s.execution_backend == "minute_filter":
@@ -1182,6 +1215,30 @@ class StrategyEngine:
                 "symbol": str(row["symbol"]),
                 "signals": [signal for signal, column in available if row.get(column)],
             }
+            for row in hit_df.iter_rows(named=True)
+        ]
+
+    @staticmethod
+    def _collect_exit_filter_hits(
+        df: pl.DataFrame,
+        exit_filter_fn: Callable[[pl.DataFrame, dict], pl.Expr],
+        params: dict,
+    ) -> list[dict]:
+        """策略自定义卖点(exit_filter) → 命中列表, 与信号命中同结构。
+
+        表达式求值失败只记日志并返回空: 卖点缺失不应阻断当日选股结果,
+        回测路径对同一错误是显式报错(见 StrategyBacktestService)。
+        """
+        try:
+            expr = exit_filter_fn(df, params)
+            if expr is None:
+                return []
+            hit_df = df.filter(expr.fill_null(False))
+        except Exception as e:  # noqa: BLE001
+            logger.warning("strategy exit_filter failed: %s", e)
+            return []
+        return [
+            {"symbol": str(row["symbol"]), "signals": ["exit_filter"]}
             for row in hit_df.iter_rows(named=True)
         ]
 
