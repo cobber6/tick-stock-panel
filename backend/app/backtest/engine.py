@@ -75,7 +75,7 @@ def _entry_gap_blocked(
 
 
 def _entry_gap_blocked_for_fill(
-    entry_price: float, prev_close: float, config: "MatcherConfig"
+    entry_price: float, prev_close: float, config: MatcherConfig
 ) -> bool:
     """gap 过滤只对次日开盘成交 (open_t+1) 有意义。
 
