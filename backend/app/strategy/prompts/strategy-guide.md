@@ -180,6 +180,7 @@ ENTRY_MAX_GAP_PCT = 0.03  # 次日开盘 / 前收 - 1 >= 3% 则拦截买入
 - 由回测矩阵撮合在入场日按 `entry_price / 前一交易日收盘 - 1` 判断；前收缺失时 fail-closed（拦截）。
 - **只对次日开盘成交（`entry_fill="open_t+1"`）生效**；`high_t` / `close_t` 是当日成交，不套用隔夜 gap 阈值。
 - 仅影响建仓，不影响已有持仓的卖出；`None` 表示不过滤。
+- 可在 `META.params` 中声明 `id="entry_max_gap_pct"` 的 float 参数暴露到回测页；回测服务优先取参数值，填 `0` 表示关闭。
 - 可在回测请求的 `overrides.entry_max_gap_pct` 中覆盖（含 `null` 关闭）。
 
 ## 3. 常用指标列（参考，可直接使用）

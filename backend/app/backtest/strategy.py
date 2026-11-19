@@ -1211,13 +1211,23 @@ class StrategyBacktestService:
                 f"激活涨幅({trailing_take_profit_activate:.0%}), 请调整后再试"
             )
         max_hold_days = self._override_value(overrides, "max_hold_days", s.max_hold_days)
-        entry_max_gap_pct = self._normalize_pct(
-            self._override_value(
-                overrides, "entry_max_gap_pct", getattr(s, "entry_max_gap_pct", None)
-            ),
-            0.001,
-            1.0,
+        # gap 阈值优先取回测页参数 (策略可把它做成 META.params), 其次模块常量;
+        # override 优先级最高。参数填 0 = 关闭。
+        gap_from_params = params.get("entry_max_gap_pct")
+        gap_value = self._override_value(
+            overrides,
+            "entry_max_gap_pct",
+            gap_from_params
+            if gap_from_params is not None
+            else getattr(s, "entry_max_gap_pct", None),
         )
+        if gap_value is not None:
+            try:
+                if float(gap_value) == 0:
+                    gap_value = None
+            except (TypeError, ValueError):
+                pass
+        entry_max_gap_pct = self._normalize_pct(gap_value, 0.001, 1.0)
         score_min, score_max = self._normalize_score_range(
             overrides.get("score_min"),
             overrides.get("score_max"),
